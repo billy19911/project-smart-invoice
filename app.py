@@ -503,23 +503,36 @@ NOTA_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block con
             <i class="bi bi-stars"></i> Produk Baru! Simpan info harga ke database
           </div>
           <div class="row g-2">
-            <div class="col-4">
+            <div class="col-md-3 col-6">
               <label class="form-label">Harga Retail</label>
               <div class="input-group input-group-sm">
                 <span class="input-group-text">Rp</span>
                 <input type="number" id="inp-ret" class="form-control" min="0" placeholder="0">
               </div>
             </div>
-            <div class="col-4">
+            <div class="col-md-3 col-6">
               <label class="form-label">Harga Grosir</label>
               <div class="input-group input-group-sm">
                 <span class="input-group-text">Rp</span>
                 <input type="number" id="inp-gro" class="form-control" min="0" placeholder="0">
               </div>
             </div>
-            <div class="col-4">
+            <div class="col-md-3 col-6">
               <label class="form-label">Min Qty Grosir</label>
               <input type="number" id="inp-min-gro" class="form-control form-control-sm" min="1" value="10">
+            </div>
+            <div class="col-md-3 col-6">
+              <label class="form-label">Satuan</label>
+              <input type="text" id="inp-satuan" class="form-control form-control-sm" list="list-satuan-nota" maxlength="20" value="pcs">
+              <datalist id="list-satuan-nota">
+                <option value="pcs">
+                <option value="pack">
+                <option value="lusin">
+                <option value="doz">
+                <option value="box">
+                <option value="roll">
+                <option value="set">
+              </datalist>
             </div>
           </div>
         </div>
@@ -578,7 +591,7 @@ NOTA_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block con
 // ── State ────────────────────────────────────────────────────────────────────
 let items = [];
 let produkCache = {};
-let allProduk = [];   // [{nama, harga_ret, harga_gro, min_gro}]
+let allProduk = [];   // [nama]
 const DRAFT_KEY = 'smartnota_draft';
 
 // ── Load semua produk dari server ─────────────────────────────────────────────
@@ -721,9 +734,10 @@ async function lookupNama(nama){
     applyProduk(produkCache[key]);
     panelBaru.classList.add('d-none');
   } else {
-    produkCache[key] = {harga_ret:0,harga_gro:0,min_gro:10,is_new:true};
+    produkCache[key] = {harga_ret:0,harga_gro:0,min_gro:10,satuan:'pcs',is_new:true};
     inpHarga.value = '';
     panelBaru.classList.remove('d-none');
+    document.getElementById('inp-satuan').value = 'pcs';
   }
 }
 
@@ -773,18 +787,20 @@ function tambahItem(){
   let hargaRet = parseFloat(document.getElementById('inp-ret').value)||0;
   let hargaGro = parseFloat(document.getElementById('inp-gro').value)||0;
   let minGro   = parseInt(document.getElementById('inp-min-gro').value)||10;
+  let satuan   = (document.getElementById('inp-satuan').value || 'pcs').trim().toLowerCase();
   let harga    = parseFloat(inpHarga.value)||0;
+  if(!satuan) satuan = 'pcs';
 
   if(isNew && harga<=0 && hargaRet>0) harga = hargaRet;
   if(isNew && hargaGro<=0) hargaGro = hargaRet||harga;
 
   if(harga<=0) return showToast('Isi harga terlebih dahulu!','danger');
 
-  let extra = {harga_ret:harga, harga_gro:harga, min_gro:10, is_new:false};
+  let extra = {harga_ret:harga, harga_gro:harga, min_gro:10, satuan:'pcs', is_new:false};
   if(produkCache[key] && !isNew){
     extra = {...produkCache[key]};
   } else if(isNew) {
-    extra = {harga_ret:hargaRet||harga, harga_gro:hargaGro||harga, min_gro:minGro, is_new:true};
+    extra = {harga_ret:hargaRet||harga, harga_gro:hargaGro||harga, min_gro:minGro, satuan:satuan, is_new:true};
     produkCache[key] = {...extra};
   }
 
@@ -792,7 +808,7 @@ function tambahItem(){
   const hargaFinal = isGrosir ? extra.harga_gro : extra.harga_ret;
   items.push({nama, qty, harga:hargaFinal, subtotal:qty*hargaFinal,
               harga_ret:extra.harga_ret, harga_gro:extra.harga_gro,
-              min_gro:extra.min_gro, is_new:extra.is_new, isGrosir});
+              min_gro:extra.min_gro, satuan:extra.satuan || 'pcs', is_new:extra.is_new, isGrosir});
   renderTable();
   saveDraft();
   showToast(nama+' ditambahkan ✓','success');
@@ -801,6 +817,7 @@ function tambahItem(){
   document.getElementById('inp-ret').value='';
   document.getElementById('inp-gro').value='';
   document.getElementById('inp-min-gro').value=10;
+  document.getElementById('inp-satuan').value='pcs';
   inpNama.focus();
 }
 
@@ -826,7 +843,7 @@ function renderTable(){
             : '<span class="badge-pill badge-retail"><i class="bi bi-tag me-1"></i>Retail</span>'}
         </small>
       </td>
-      <td class="text-center fw-semibold">${it.qty}</td>
+      <td class="text-center fw-semibold">${it.qty} ${esc(it.satuan || 'pcs')}</td>
       <td class="text-end" style="font-size:.82rem">Rp ${fmt(it.harga)}</td>
       <td class="text-end">
         <button class="btn btn-sm btn-icon btn-outline-danger" onclick="hapusItem(${i})">
@@ -1176,10 +1193,19 @@ DETAIL_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block c
 PRODUK_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block content %}
 <div class="card">
   <div class="card-header-custom">
-    <h6><i class="bi bi-box-seam me-2"></i>Daftar Produk ({{ produk|length }})</h6>
+    <h6><i class="bi bi-box-seam me-2"></i>Daftar Produk (<span id="produk-count">{{ produk|length }}</span>)</h6>
     <span class="badge bg-primary rounded-pill">Auto-saved dari nota</span>
   </div>
   {% if produk %}
+  <div class="card-body-custom border-bottom">
+    <div class="input-group">
+      <span class="input-group-text" style="background:#f8fafc;border-color:var(--border)">
+        <i class="bi bi-search text-muted"></i>
+      </span>
+      <input type="text" class="form-control" id="produk-search"
+             placeholder="Cari nama produk atau satuan...">
+    </div>
+  </div>
   <div class="card-body-custom p-0">
     <table class="table-custom">
       <thead>
@@ -1188,30 +1214,34 @@ PRODUK_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block c
           <th>Nama Produk</th>
           <th class="text-end">Harga Retail</th>
           <th class="text-end">Harga Grosir</th>
+          <th class="text-center">Satuan</th>
           <th class="text-center">Min Grosir</th>
           <th class="text-center">Aksi</th>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="produk-table-body">
         {% for p in produk %}
-        <tr id="row-{{ p.id }}">
-          <td style="color:var(--text-muted);font-size:.8rem">{{ loop.index }}</td>
+        <tr id="row-{{ p.id }}" data-nama="{{ p.nama|lower }}" data-satuan="{{ (p.satuan or 'pcs')|lower }}">
+          <td class="row-index" style="color:var(--text-muted);font-size:.8rem">{{ loop.index }}</td>
           <td><div style="font-weight:500">{{ p.nama }}</div></td>
           <td class="text-end">Rp {{ '{:,.0f}'.format(p.harga_ret).replace(',','.') }}</td>
           <td class="text-end" style="color:var(--accent);font-weight:600">
             Rp {{ '{:,.0f}'.format(p.harga_gro).replace(',','.') }}
           </td>
           <td class="text-center">
-            <span class="badge-pill badge-grosir">≥ {{ p.min_gro }} pcs</span>
+            <span class="badge bg-light text-secondary border">{{ p.satuan or 'pcs' }}</span>
+          </td>
+          <td class="text-center">
+            <span class="badge-pill badge-grosir">≥ {{ p.min_gro }} {{ p.satuan or 'pcs' }}</span>
           </td>
           <td class="text-center">
             <div class="d-flex gap-1 justify-content-center">
               <button class="btn btn-sm btn-outline-primary btn-icon" title="Edit"
-                onclick="bukaEdit({{ p.id }},'{{ p.nama }}',{{ p.harga_ret }},{{ p.harga_gro }},{{ p.min_gro }})">
+                onclick='bukaEdit({{ p.id }}, {{ p.nama|tojson }}, {{ p.harga_ret }}, {{ p.harga_gro }}, {{ p.min_gro }}, {{ (p.satuan or "pcs")|tojson }})'>
                 <i class="bi bi-pencil"></i>
               </button>
               <button class="btn btn-sm btn-outline-danger btn-icon" title="Hapus"
-                onclick="hapusProduk({{ p.id }},'{{ p.nama }}')">
+                onclick='hapusProduk({{ p.id }}, {{ p.nama|tojson }})'>
                 <i class="bi bi-trash3"></i>
               </button>
             </div>
@@ -1249,25 +1279,38 @@ PRODUK_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block c
           <small class="text-muted">Nama tidak bisa diubah</small>
         </div>
         <div class="row g-3">
-          <div class="col-4">
+          <div class="col-md-3 col-6">
             <label class="form-label">Harga Retail</label>
             <div class="input-group">
               <span class="input-group-text" style="font-size:.8rem">Rp</span>
               <input type="number" id="edit-ret" class="form-control" min="0">
             </div>
           </div>
-          <div class="col-4">
+          <div class="col-md-3 col-6">
             <label class="form-label">Harga Grosir</label>
             <div class="input-group">
               <span class="input-group-text" style="font-size:.8rem">Rp</span>
               <input type="number" id="edit-gro" class="form-control" min="0">
             </div>
           </div>
-          <div class="col-4">
+          <div class="col-md-3 col-6">
             <label class="form-label">Min Grosir</label>
             <input type="number" id="edit-min" class="form-control" min="1">
           </div>
+          <div class="col-md-3 col-6">
+            <label class="form-label">Satuan</label>
+            <input type="text" id="edit-satuan" class="form-control" list="list-satuan" maxlength="20" placeholder="pcs">
+          </div>
         </div>
+        <datalist id="list-satuan">
+          <option value="pcs">
+          <option value="pack">
+          <option value="lusin">
+          <option value="doz">
+          <option value="box">
+          <option value="roll">
+          <option value="set">
+        </datalist>
       </div>
       <div class="modal-footer border-0 pt-0">
         <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Batal</button>
@@ -1282,12 +1325,13 @@ PRODUK_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block c
 <script>
 const modalEdit = new bootstrap.Modal(document.getElementById('modalEdit'));
 
-function bukaEdit(id, nama, ret, gro, min){
+function bukaEdit(id, nama, ret, gro, min, satuan){
   document.getElementById('edit-id').value   = id;
   document.getElementById('edit-nama').value = nama;
   document.getElementById('edit-ret').value  = ret;
   document.getElementById('edit-gro').value  = gro;
   document.getElementById('edit-min').value  = min;
+  document.getElementById('edit-satuan').value = (satuan || 'pcs');
   modalEdit.show();
 }
 
@@ -1296,10 +1340,11 @@ async function simpanEdit(){
   const ret = parseFloat(document.getElementById('edit-ret').value)||0;
   const gro = parseFloat(document.getElementById('edit-gro').value)||0;
   const min = parseInt(document.getElementById('edit-min').value)||1;
+  const satuan = (document.getElementById('edit-satuan').value || 'pcs').trim().toLowerCase();
   const r = await fetch('/api/produk/edit/'+id, {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({harga_ret:ret, harga_gro:gro, min_gro:min})
+    body: JSON.stringify({harga_ret:ret, harga_gro:gro, min_gro:min, satuan:satuan || 'pcs'})
   });
   const d = await r.json();
   if(d.ok){ showToast('Produk berhasil diupdate','success'); modalEdit.hide(); setTimeout(()=>location.reload(),600); }
@@ -1310,8 +1355,41 @@ async function hapusProduk(id, nama){
   if(!confirm('Hapus produk "'+nama+'"?')) return;
   const r = await fetch('/api/produk/hapus/'+id, {method:'POST'});
   const d = await r.json();
-  if(d.ok){ showToast(nama+' dihapus','warning'); document.getElementById('row-'+id).remove(); }
+  if(d.ok){
+    showToast(nama+' dihapus','warning');
+    const row = document.getElementById('row-'+id);
+    if(row) row.remove();
+    filterProdukRows();
+  }
   else showToast('Gagal: '+d.msg,'danger');
+}
+
+function filterProdukRows(){
+  const inp = document.getElementById('produk-search');
+  const body = document.getElementById('produk-table-body');
+  if(!inp || !body) return;
+  const q = (inp.value || '').trim().toLowerCase();
+  const rows = [...body.querySelectorAll('tr')];
+  let visible = 0;
+  rows.forEach((row)=>{
+    const nama = row.dataset.nama || '';
+    const satuan = row.dataset.satuan || '';
+    const match = !q || nama.includes(q) || satuan.includes(q);
+    row.style.display = match ? '' : 'none';
+    if(match){
+      visible++;
+      const idxCell = row.querySelector('.row-index');
+      if(idxCell) idxCell.textContent = visible;
+    }
+  });
+  const count = document.getElementById('produk-count');
+  if(count) count.textContent = visible;
+}
+
+const produkSearch = document.getElementById('produk-search');
+if(produkSearch){
+  produkSearch.addEventListener('input', filterProdukRows);
+  filterProdukRows();
 }
 </script>
 {% endblock %}""")
@@ -1330,8 +1408,13 @@ def init_db():
         nama TEXT NOT NULL UNIQUE,
         harga_ret REAL NOT NULL DEFAULT 0,
         harga_gro REAL NOT NULL DEFAULT 0,
-        min_gro INTEGER NOT NULL DEFAULT 1
+        min_gro INTEGER NOT NULL DEFAULT 1,
+        satuan TEXT NOT NULL DEFAULT 'pcs'
     )''')
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(produk)").fetchall()]
+    if 'satuan' not in cols:
+        cur.execute("ALTER TABLE produk ADD COLUMN satuan TEXT NOT NULL DEFAULT 'pcs'")
+    cur.execute("UPDATE produk SET satuan='pcs' WHERE satuan IS NULL OR TRIM(satuan)='' ")
     cur.execute('''CREATE TABLE IF NOT EXISTS nota (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nomor TEXT NOT NULL,
@@ -1436,7 +1519,8 @@ def api_produk(nama):
     con.close()
     if row:
         return jsonify({'found':True,'harga_ret':row['harga_ret'],
-                        'harga_gro':row['harga_gro'],'min_gro':row['min_gro']})
+              'harga_gro':row['harga_gro'],'min_gro':row['min_gro'],
+              'satuan': row['satuan'] or 'pcs'})
     return jsonify({'found':False})
 
 @app.route('/api/produk/list')
@@ -1451,19 +1535,21 @@ def api_produk_batch():
     data = request.get_json() or []
     con  = get_con(); cur = con.cursor()
     for p in data:
-        cur.execute('''INSERT INTO produk (nama,harga_ret,harga_gro,min_gro) VALUES (?,?,?,?)
+        satuan = (p.get('satuan') or 'pcs').strip().lower()[:20]
+        cur.execute('''INSERT INTO produk (nama,harga_ret,harga_gro,min_gro,satuan) VALUES (?,?,?,?,?)
             ON CONFLICT(nama) DO UPDATE SET
-            harga_ret=excluded.harga_ret,harga_gro=excluded.harga_gro,min_gro=excluded.min_gro''',
-            (p['nama'], p['harga_ret'], p['harga_gro'], p['min_gro']))
+            harga_ret=excluded.harga_ret,harga_gro=excluded.harga_gro,min_gro=excluded.min_gro,satuan=excluded.satuan''',
+            (p['nama'], p['harga_ret'], p['harga_gro'], p['min_gro'], satuan or 'pcs'))
     con.commit(); con.close()
     return jsonify({'ok': True})
 
 @app.route('/api/produk/edit/<int:produk_id>', methods=['POST'])
 def api_produk_edit(produk_id):
     data = request.get_json()
+    satuan = (data.get('satuan') or 'pcs').strip().lower()[:20]
     con  = get_con()
-    con.execute("UPDATE produk SET harga_ret=?,harga_gro=?,min_gro=? WHERE id=?",
-                (data['harga_ret'], data['harga_gro'], data['min_gro'], produk_id))
+    con.execute("UPDATE produk SET harga_ret=?,harga_gro=?,min_gro=?,satuan=? WHERE id=?",
+                (data['harga_ret'], data['harga_gro'], data['min_gro'], satuan or 'pcs', produk_id))
     con.commit(); con.close()
     return jsonify({'ok': True})
 
@@ -1485,11 +1571,12 @@ def api_simpan():
     total     = sum(i['subtotal'] for i in items)
     con = get_con(); cur = con.cursor()
     for i in items:
-        if i.get('is_new'):
-            cur.execute('''INSERT INTO produk (nama,harga_ret,harga_gro,min_gro) VALUES (?,?,?,?)
-                ON CONFLICT(nama) DO UPDATE SET
-                harga_ret=excluded.harga_ret,harga_gro=excluded.harga_gro,min_gro=excluded.min_gro''',
-                (i['nama'],i['harga_ret'],i['harga_gro'],i['min_gro']))
+      if i.get('is_new'):
+        satuan = (i.get('satuan') or 'pcs').strip().lower()[:20]
+        cur.execute('''INSERT INTO produk (nama,harga_ret,harga_gro,min_gro,satuan) VALUES (?,?,?,?,?)
+          ON CONFLICT(nama) DO UPDATE SET
+          harga_ret=excluded.harga_ret,harga_gro=excluded.harga_gro,min_gro=excluded.min_gro,satuan=excluded.satuan''',
+          (i['nama'], i['harga_ret'], i['harga_gro'], i['min_gro'], satuan or 'pcs'))
     cur.execute("INSERT INTO nota (nomor,pelanggan,tanggal,total) VALUES (?,?,?,?)",
                 (nomor,pelanggan,tanggal,total))
     nota_id = cur.lastrowid

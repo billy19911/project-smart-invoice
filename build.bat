@@ -25,7 +25,6 @@ py -m PyInstaller ^
   --exclude-module numpy ^
   --exclude-module pandas ^
   --exclude-module tkinter ^
-  --exclude-module unittest ^
   app.py
 
 if errorlevel 1 (
