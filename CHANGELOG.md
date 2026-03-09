@@ -2,6 +2,31 @@
 
 Semua perubahan penting pada project ini didokumentasikan di file ini.
 
+## [1.1.0] - 2026-03-09
+
+### Added
+- Import item dari Excel via endpoint `POST /api/import/excel` dengan parser `openpyxl`.
+- Auto-baca metadata `pelanggan` dan `tanggal nota` dari file Excel.
+- Queue import (`Daftar Item Import`) untuk review sebelum item dimasukkan ke nota.
+- Field `Tanggal Nota` pada form nota + dukungan simpan tanggal custom ke database.
+- Format nomor nota baru: `#NNN/OB/SMP/DD/MM/YYYY`.
+- Aksi edit nomor nota dari halaman Riwayat via endpoint `POST /api/nota/edit-nomor/<id>`.
+
+### Changed
+- Desain PDF dituning agar lebih mirip template referensi (layout, tipografi, posisi elemen).
+- Asset PDF (`LOGOKOP`, `LOGOCAP`, `TTD`) di-load otomatis dari folder `img` dengan prioritas file `.png`.
+- Proses simpan nota meng-upsert data produk termasuk nama hasil edit agar sinkron dengan daftar produk.
+- Build config diperbarui agar folder `img` ikut ter-bundle di executable PyInstaller.
+
+### Fixed
+- Matching nama produk saat import dibuat lebih toleran (normalisasi spasi/simbol + fallback contains).
+- Alur import disesuaikan agar item dapat dimasukkan via mekanisme `Tambah Barang`, bukan langsung hard insert.
+- Kasus harga satuan menjadi `0` di preview diperbaiki dengan fallback ke nilai form + validasi blokir item harga 0.
+- Perbaikan stabilitas build dan path asset saat aplikasi dijalankan sebagai `.exe` (frozen runtime).
+
+### Dependencies
+- Tambahan dependency: `openpyxl>=3.1`.
+
 ---
 
 ## [1.0.0] - 2026-03-07

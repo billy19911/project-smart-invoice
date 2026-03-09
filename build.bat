@@ -5,7 +5,7 @@ echo ============================================
 echo.
 
 echo [1/3] Install dependencies...
-py -m pip install flask fpdf2 pystray Pillow pyinstaller
+py -m pip install flask fpdf2 pystray Pillow pyinstaller openpyxl
 if errorlevel 1 (
   echo.
   echo GAGAL install! Pastikan Python sudah terinstall.
@@ -21,6 +21,7 @@ py -m PyInstaller ^
   --onefile ^
   --noconsole ^
   --name "SmartNota" ^
+  --add-data "img;img" ^
   --exclude-module matplotlib ^
   --exclude-module numpy ^
   --exclude-module pandas ^

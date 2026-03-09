@@ -2,10 +2,16 @@ import os
 import sys
 import socket
 import sqlite3
+import re
 from datetime import datetime
 from flask import Flask, render_template_string, request, jsonify, send_file
 from fpdf import FPDF
 import tempfile
+
+try:
+  from openpyxl import load_workbook
+except Exception:
+  load_workbook = None
 
 # ── Base dir ─────────────────────────────────────────────────────────────────
 def get_base_dir():
@@ -27,6 +33,272 @@ def get_ip():
         return ip
     except Exception:
         return '127.0.0.1'
+
+
+def normalize_space(text):
+    return re.sub(r'\s+', ' ', str(text or '').strip())
+
+
+def clean_number(value, default=0.0):
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip().replace('Rp', '').replace('rp', '')
+    s = s.replace('.', '').replace(',', '.')
+    try:
+        return float(s)
+    except Exception:
+        return default
+
+
+def fmt_rp(value):
+    return f"{float(value):,.0f}".replace(',', '.')
+
+
+def normalize_product_name(value):
+  s = normalize_space(value).lower()
+  s = re.sub(r'[^a-z0-9]+', ' ', s)
+  return normalize_space(s)
+
+
+def find_produk_match_row(con, nama):
+  nama_raw = normalize_space(nama)
+  if not nama_raw:
+    return None
+
+  row = con.execute(
+    "SELECT * FROM produk WHERE LOWER(TRIM(nama))=LOWER(TRIM(?))",
+    (nama_raw,)
+  ).fetchone()
+  if row:
+    return row
+
+  target = normalize_product_name(nama_raw)
+  if not target:
+    return None
+
+  rows = con.execute("SELECT * FROM produk").fetchall()
+  for r in rows:
+    if normalize_product_name(r['nama']) == target:
+      return r
+
+  for r in rows:
+    norm_db = normalize_product_name(r['nama'])
+    if target in norm_db or norm_db in target:
+      return r
+
+  return None
+
+
+def find_asset_image(prefix):
+    candidates = []
+    if getattr(sys, 'frozen', False):
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            candidates.append(os.path.join(meipass, 'img'))
+        candidates.append(os.path.join(os.path.dirname(sys.executable), 'img'))
+    candidates.append(os.path.join(BASE_DIR, 'img'))
+
+    prefix = prefix.lower()
+    ext_priority = ('.png', '.webp', '.jpg', '.jpeg')
+    for img_dir in candidates:
+        if not os.path.isdir(img_dir):
+            continue
+        names = sorted(os.listdir(img_dir), key=lambda n: n.lower())
+        for ext in ext_priority:
+            for name in names:
+                low = name.lower()
+                if low.startswith(prefix) and low.endswith(ext):
+                    return os.path.join(img_dir, name)
+    return None
+
+
+def terbilang_id(n):
+    angka = int(round(float(n)))
+    if angka == 0:
+        return 'Nol Rupiah'
+
+    dasar = [
+        '', 'Satu', 'Dua', 'Tiga', 'Empat', 'Lima',
+        'Enam', 'Tujuh', 'Delapan', 'Sembilan', 'Sepuluh', 'Sebelas'
+    ]
+
+    def _conv(x):
+        x = int(x)
+        if x < 12:
+            return dasar[x]
+        if x < 20:
+            return _conv(x - 10) + ' Belas'
+        if x < 100:
+            p = x // 10
+            s = x % 10
+            return _conv(p) + ' Puluh' + ('' if s == 0 else ' ' + _conv(s))
+        if x < 200:
+            return 'Seratus' + ('' if x == 100 else ' ' + _conv(x - 100))
+        if x < 1000:
+            r = x // 100
+            s = x % 100
+            return _conv(r) + ' Ratus' + ('' if s == 0 else ' ' + _conv(s))
+        if x < 2000:
+            return 'Seribu' + ('' if x == 1000 else ' ' + _conv(x - 1000))
+        if x < 1_000_000:
+            r = x // 1000
+            s = x % 1000
+            return _conv(r) + ' Ribu' + ('' if s == 0 else ' ' + _conv(s))
+        if x < 1_000_000_000:
+            r = x // 1_000_000
+            s = x % 1_000_000
+            return _conv(r) + ' Juta' + ('' if s == 0 else ' ' + _conv(s))
+        r = x // 1_000_000_000
+        s = x % 1_000_000_000
+        return _conv(r) + ' Miliar' + ('' if s == 0 else ' ' + _conv(s))
+
+    return normalize_space(_conv(angka) + ' Rupiah')
+
+
+def parse_items_from_excel(file_storage):
+    if load_workbook is None:
+        raise RuntimeError('Library openpyxl belum terpasang')
+
+    wb = load_workbook(file_storage, data_only=True)
+    ws = wb.active
+
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return {'items': [], 'pelanggan': '', 'tanggal': ''}
+
+    pelanggan = ''
+    tanggal = ''
+
+    def parse_excel_date(v):
+        if not v:
+            return ''
+        if isinstance(v, datetime):
+            return v.strftime('%Y-%m-%d %H:%M')
+        s = normalize_space(v)
+        if not s:
+            return ''
+
+        # Ambil tanggal dari teks bebas, contoh: "TANGGAL : 01 - 01 - 2026"
+        m = re.search(r'(\d{1,2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{2,4})', s)
+        if m:
+            dd = int(m.group(1))
+            mm = int(m.group(2))
+            yy = int(m.group(3))
+            if yy < 100:
+                yy += 2000
+            try:
+                dt = datetime(yy, mm, dd)
+                return dt.strftime('%Y-%m-%d 00:00')
+            except Exception:
+                pass
+
+        s2 = s.replace('.', '-').replace('/', '-').replace(' - ', '-').replace(' ', '')
+        patterns = ['%d-%m-%Y', '%d-%m-%y', '%Y-%m-%d', '%d%m%Y', '%d%m%y']
+        for pat in patterns:
+            try:
+                dt = datetime.strptime(s2, pat)
+                return dt.strftime('%Y-%m-%d 00:00')
+            except Exception:
+                pass
+        return ''
+
+    for row in rows[:25]:
+        for i, cell in enumerate(row):
+            text = normalize_space(cell)
+            if not text:
+                continue
+
+            key = text.lower().replace(' ', '')
+
+            # Customer bisa dalam sel label terpisah atau inline sesudah ':'
+            if key.startswith('customer') or key.startswith('pelanggan'):
+                inline = re.split(r':', text, maxsplit=1)
+                if len(inline) == 2 and normalize_space(inline[1]):
+                    pelanggan = normalize_space(inline[1])
+                elif i + 1 < len(row):
+                    pelanggan = normalize_space(row[i + 1])
+                elif i + 2 < len(row):
+                    pelanggan = normalize_space(row[i + 2])
+
+            # Tanggal bisa dalam sel terpisah atau inline
+            if key.startswith('tanggal') or key.startswith('date'):
+                tanggal_try = parse_excel_date(text)
+                if not tanggal_try and i + 1 < len(row):
+                    tanggal_try = parse_excel_date(row[i + 1])
+                if not tanggal_try and i + 2 < len(row):
+                    tanggal_try = parse_excel_date(row[i + 2])
+                if tanggal_try:
+                    tanggal = tanggal_try
+
+    def keyify(v):
+        return normalize_space(v).lower().replace('.', '').replace('_', ' ')
+
+    header_row = -1
+    header_map = {}
+    aliases = {
+        'nama': ['nama barang', 'nama', 'barang', 'item'],
+        'qty': ['qty', 'jumlah', 'kuantitas'],
+        'satuan': ['satuan', 'unit'],
+        'harga': ['harga jual', 'harga', 'harga satuan', 'price'],
+        'keterangan': ['keterangan', 'isi', 'merk', 'catatan']
+    }
+
+    for ridx, row in enumerate(rows[:30]):
+        local = {}
+        for cidx, cell in enumerate(row):
+            key = keyify(cell)
+            for canonical, names in aliases.items():
+                if key in names:
+                    local[canonical] = cidx
+        if 'nama' in local and 'qty' in local:
+            header_row = ridx
+            header_map = local
+            break
+
+    if header_row == -1:
+        # Fallback: asumsi format NO | NAMA | QTY | SATUAN | KETERANGAN
+        header_row = 0
+        header_map = {'nama': 1, 'qty': 2, 'satuan': 3, 'keterangan': 4}
+
+    out = []
+    for row in rows[header_row + 1:]:
+        nama = normalize_space(row[header_map['nama']] if len(row) > header_map['nama'] else '')
+        qty_raw = row[header_map['qty']] if len(row) > header_map['qty'] else ''
+        qty = int(clean_number(qty_raw, 0))
+
+        if not nama and qty <= 0:
+            continue
+        if not nama:
+            continue
+        if qty <= 0:
+            qty = 1
+
+        satuan_idx = header_map.get('satuan')
+        ket_idx = header_map.get('keterangan')
+        harga_idx = header_map.get('harga')
+        satuan = normalize_space(
+            row[satuan_idx] if satuan_idx is not None and len(row) > satuan_idx else 'pcs'
+        ).lower() or 'pcs'
+        keterangan = normalize_space(row[ket_idx] if ket_idx is not None and len(row) > ket_idx else '')
+        harga = clean_number(row[harga_idx] if harga_idx is not None and len(row) > harga_idx else 0, 0)
+
+        out.append({
+            'nama': nama,
+            'qty': qty,
+            'satuan': satuan,
+            'keterangan': keterangan,
+            'harga': harga,
+            'subtotal': qty * harga,
+            'harga_ret': harga,
+            'harga_gro': harga,
+            'min_gro': 10,
+            'is_new': True,
+            'isGrosir': False,
+        })
+
+    return {'items': out, 'pelanggan': pelanggan, 'tanggal': tanggal}
 
 # ════════════════════════════════════════════════════════════════════════════
 #  SHARED LAYOUT
@@ -210,6 +482,11 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);margi
 .empty-state i{font-size:3rem;opacity:.3;display:block;margin-bottom:12px}
 .empty-state p{font-size:.9rem}
 
+/* ── Nota preview table ── */
+.nota-preview-scroll{overflow-x:auto;overflow-y:hidden}
+.nota-preview-table{min-width:640px}
+.nota-preview-table .form-control,.nota-preview-table .input-group-text{font-size:.78rem}
+
 /* ── Nota detail print ── */
 @media print{
   .sidebar,.topbar,.no-print{display:none!important}
@@ -227,6 +504,14 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);margi
   .main{margin-left:0}
   .content{padding:16px}
   .topbar{padding:10px 16px}
+  .nota-preview-sticky{position:static!important;top:auto!important}
+  .nota-preview-table{min-width:600px}
+  .nota-preview-table thead th{font-size:.64rem;padding:8px 8px}
+  .nota-preview-table tbody td{padding:8px 6px}
+  .nota-preview-table .form-control{padding:6px 7px;font-size:.76rem}
+  .nota-preview-table .input-group-text{padding:5px 7px;font-size:.72rem}
+  .total-row{padding:10px 12px}
+  .total-row .amount{font-size:1.1rem}
 }
 
 /* ── Animations ── */
@@ -446,15 +731,23 @@ INDEX_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block co
 NOTA_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block content %}
 <div class="row g-3">
   <!-- Left: Form input -->
-  <div class="col-lg-7">
+  <div class="col-lg-6">
     <!-- Info pelanggan -->
     <div class="card mb-3">
       <div class="card-header-custom">
         <h6><i class="bi bi-person-fill me-2"></i>Info Pelanggan</h6>
       </div>
       <div class="card-body-custom">
-        <label class="form-label">Nama Pelanggan</label>
-        <input type="text" id="pelanggan" class="form-control" placeholder="Opsional – kosongkan jika umum">
+        <div class="row g-3">
+          <div class="col-md-7">
+            <label class="form-label">Nama Pelanggan</label>
+            <input type="text" id="pelanggan" class="form-control" placeholder="Opsional – kosongkan jika umum">
+          </div>
+          <div class="col-md-5">
+            <label class="form-label">Tanggal Nota</label>
+            <input type="datetime-local" id="tanggal-nota" class="form-control">
+          </div>
+        </div>
       </div>
     </div>
 
@@ -494,6 +787,16 @@ NOTA_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block con
           <div class="col-4">
             <label class="form-label">Subtotal</label>
             <input type="text" id="inp-subtotal" class="form-control readonly-field" readonly>
+          </div>
+        </div>
+        <div class="row g-3 mb-3">
+          <div class="col-8">
+            <label class="form-label">Keterangan (opsional)</label>
+            <input type="text" id="inp-keterangan" class="form-control" placeholder="Misal: isi 10 box / merk / catatan">
+          </div>
+          <div class="col-4">
+            <label class="form-label">Satuan</label>
+            <input type="text" id="inp-satuan-main" class="form-control" list="list-satuan-nota" maxlength="20" value="pcs">
           </div>
         </div>
 
@@ -542,32 +845,68 @@ NOTA_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block con
         </button>
       </div>
     </div>
+
+    <div class="card mb-3">
+      <div class="card-header-custom">
+        <h6><i class="bi bi-file-earmark-excel me-2 text-success"></i>Import Draft dari Excel</h6>
+      </div>
+      <div class="card-body-custom">
+        <div class="d-flex flex-column gap-2">
+          <input type="file" id="inp-excel" class="form-control" accept=".xlsx,.xlsm,.xltx,.xltm">
+          <button class="btn btn-outline-success" onclick="importExcelDraft()">
+            <i class="bi bi-upload me-1"></i>Ambil Item dari Excel ke Draft
+          </button>
+          <small style="color:var(--text-muted);font-size:.75rem">
+            Data masuk ke daftar import dulu, lalu Anda pilih kapan dipindah ke preview nota.
+          </small>
+          <div id="import-queue-wrap" class="d-none mt-2" style="border:1px solid var(--border);border-radius:8px">
+            <div class="d-flex justify-content-between align-items-center px-3 py-2" style="background:#f8fafc;border-bottom:1px solid var(--border)">
+              <strong style="font-size:.8rem">Daftar Item Import</strong>
+              <span class="badge bg-primary rounded-pill" id="import-count">0</span>
+            </div>
+            <div id="import-queue-list" style="max-height:220px;overflow:auto"></div>
+            <div class="p-2 border-top" style="background:#fff">
+              <button class="btn btn-sm btn-primary w-100" onclick="addAllImportedToPreview()">
+                <i class="bi bi-arrow-right-circle me-1"></i>Masukkan Semua via Tambah Barang
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Right: Preview nota -->
-  <div class="col-lg-5">
-    <div class="card" style="position:sticky;top:80px">
+  <div class="col-lg-6">
+    <div class="card nota-preview-sticky" style="position:sticky;top:80px">
       <div class="card-header-custom">
         <h6><i class="bi bi-file-earmark-text me-2"></i>Preview Nota</h6>
         <span class="badge bg-secondary rounded-pill" id="badge-count">0 item</span>
       </div>
       <div class="card-body-custom p-0">
-        <table class="table-custom">
+        <div class="nota-preview-scroll">
+        <table class="table-custom nota-preview-table">
           <thead>
             <tr>
-              <th>Barang</th><th class="text-center">Qty</th>
-              <th class="text-end">Harga</th><th></th>
+              <th>Barang (editable)</th>
+              <th class="text-center">Qty</th>
+              <th class="text-center">Satuan</th>
+              <th>Keterangan</th>
+              <th class="text-end">Harga</th>
+              <th class="text-end">Subtotal</th>
+              <th></th>
             </tr>
           </thead>
           <tbody id="tbl-items">
             <tr id="tr-empty">
-              <td colspan="4" class="empty-state py-4">
+              <td colspan="7" class="empty-state py-4">
                 <i class="bi bi-cart-x d-block mb-2" style="font-size:1.5rem;opacity:.3"></i>
                 <span style="font-size:.82rem">Belum ada item</span>
               </td>
             </tr>
           </tbody>
         </table>
+        </div>
       </div>
       <div class="card-body-custom pt-0">
         <div class="total-row">
@@ -590,12 +929,38 @@ NOTA_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block con
 <script>
 // ── State ────────────────────────────────────────────────────────────────────
 let items = [];
+let importQueue = [];
 let produkCache = {};
 let allProduk = [];   // [nama]
 const DRAFT_KEY = 'smartnota_draft';
 
 // ── Load semua produk dari server ─────────────────────────────────────────────
 fetch('/api/produk/list').then(r=>r.json()).then(list=>{ allProduk = list; });
+
+function normalizeItem(raw){
+  const qty = Math.max(parseInt(raw.qty)||1, 1);
+  const harga = Math.max(parseFloat(raw.harga)||0, 0);
+  return {
+    nama: (raw.nama || '').trim(),
+    qty,
+    harga,
+    subtotal: qty * harga,
+    harga_ret: parseFloat(raw.harga_ret ?? harga) || harga,
+    harga_gro: parseFloat(raw.harga_gro ?? harga) || harga,
+    min_gro: parseInt(raw.min_gro)||10,
+    satuan: ((raw.satuan || 'pcs') + '').trim().toLowerCase() || 'pcs',
+    keterangan: (raw.keterangan || '').toString().trim(),
+    is_new: !!raw.is_new,
+    isGrosir: !!raw.isGrosir
+  };
+}
+
+function recalcItem(idx){
+  if(!items[idx]) return;
+  items[idx].qty = Math.max(parseInt(items[idx].qty)||1, 1);
+  items[idx].harga = Math.max(parseFloat(items[idx].harga)||0, 0);
+  items[idx].subtotal = items[idx].qty * items[idx].harga;
+}
 
 // ── Restore draft dari localStorage ──────────────────────────────────────────
 (function restoreDraft(){
@@ -604,8 +969,9 @@ fetch('/api/produk/list').then(r=>r.json()).then(list=>{ allProduk = list; });
     if(!raw) return;
     const d = JSON.parse(raw);
     if(d.pelanggan) document.getElementById('pelanggan').value = d.pelanggan;
+    if(d.tanggal) document.getElementById('tanggal-nota').value = d.tanggal;
     if(d.items && d.items.length > 0){
-      items = d.items;
+      items = d.items.map(normalizeItem).filter(it=>it.nama);
       renderTable();
       showToast('Draft tersimpan dipulihkan ✓','info');
     }
@@ -616,11 +982,120 @@ function saveDraft(){
   try {
     localStorage.setItem(DRAFT_KEY, JSON.stringify({
       pelanggan: document.getElementById('pelanggan').value,
+      tanggal: document.getElementById('tanggal-nota').value,
       items
     }));
   } catch(e){}
 }
 function clearDraft(){ localStorage.removeItem(DRAFT_KEY); }
+
+function renderImportQueue(){
+  const wrap = document.getElementById('import-queue-wrap');
+  const list = document.getElementById('import-queue-list');
+  const count = document.getElementById('import-count');
+  if(!wrap || !list || !count) return;
+  count.textContent = importQueue.length;
+  if(!importQueue.length){
+    wrap.classList.add('d-none');
+    list.innerHTML = '';
+    return;
+  }
+  wrap.classList.remove('d-none');
+  list.innerHTML = importQueue.map((it,i)=>`
+    <div class="d-flex align-items-center gap-2 px-2 py-2" style="border-bottom:1px solid var(--border)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:.8rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(it.nama)}</div>
+        <small style="color:var(--text-muted)">${it.qty} ${esc(it.satuan||'pcs')} ${it.keterangan?'- '+esc(it.keterangan):''}</small>
+      </div>
+      <button class="btn btn-sm btn-outline-primary" onclick="addImportItemToPreview(${i})">Ke Form</button>
+      <button class="btn btn-sm btn-outline-danger" onclick="removeImportItem(${i})"><i class="bi bi-x"></i></button>
+    </div>
+  `).join('');
+}
+
+function removeImportItem(idx){
+  importQueue.splice(idx,1);
+  renderImportQueue();
+}
+
+async function resolveProdukForImport(it){
+  const qty = Math.max(parseInt(it.qty)||1, 1);
+  const nama = (it.nama||'').trim();
+  if(!nama) return normalizeItem(it);
+
+  const candidates = [nama];
+  const best = allProduk
+    .map(n=>({nama:n, score:scoreMatch(nama, n)}))
+    .sort((a,b)=>b.score-a.score);
+  if(best.length && best[0].score >= 45 && !candidates.includes(best[0].nama)){
+    candidates.push(best[0].nama);
+  }
+
+  for(const cand of candidates){
+    try{
+      const res = await fetch('/api/produk/'+encodeURIComponent(cand));
+      const d = await res.json();
+      if(d.found){
+        const minGro = parseInt(d.min_gro)||10;
+        const hargaRet = parseFloat(d.harga_ret)||0;
+        const hargaGro = parseFloat(d.harga_gro)||hargaRet;
+        const useGro = qty >= minGro && minGro > 0;
+        const harga = useGro ? hargaGro : hargaRet;
+        return normalizeItem({
+          ...it,
+          harga,
+          subtotal: qty * harga,
+          harga_ret: hargaRet,
+          harga_gro: hargaGro,
+          min_gro: minGro,
+          satuan: (it.satuan || d.satuan || 'pcs').toLowerCase(),
+          is_new: false,
+          isGrosir: useGro
+        });
+      }
+    } catch(e){}
+  }
+  return normalizeItem(it);
+}
+
+async function addImportItemToPreview(idx){
+  const raw = importQueue[idx];
+  if(!raw) return;
+
+  const resolved = await resolveProdukForImport(raw);
+  inpNama.value = resolved.nama || '';
+  await lookupNama(inpNama.value.trim());
+
+  inpQty.value = Math.max(parseInt(resolved.qty)||1,1);
+  const key = (inpNama.value || '').trim().toLowerCase();
+  if(produkCache[key]){
+    applyProduk(produkCache[key]);
+  } else {
+    inpHarga.value = parseFloat(resolved.harga)||0;
+  }
+
+  inpSatuanMain.value = (resolved.satuan || 'pcs').toLowerCase();
+  inpKet.value = resolved.keterangan || '';
+  if((parseFloat(inpHarga.value)||0) <= 0 && (parseFloat(resolved.harga)||0) > 0){
+    inpHarga.value = resolved.harga;
+  }
+  updateSubtotal();
+  tambahItem();
+
+  importQueue.splice(idx,1);
+  renderImportQueue();
+}
+
+async function addAllImportedToPreview(){
+  if(!importQueue.length) return;
+  const total = importQueue.length;
+  while(importQueue.length){
+    // Gunakan flow tambah barang agar perhitungan harga konsisten.
+    await addImportItemToPreview(0);
+  }
+  renderImportQueue();
+  showToast(total+' item dipindah lewat Tambah Barang','success');
+}
 
 // ── Fuzzy/contains search ─────────────────────────────────────────────────────
 const inpNama    = document.getElementById('inp-nama');
@@ -629,6 +1104,8 @@ const inpQty     = document.getElementById('inp-qty');
 const inpHarga   = document.getElementById('inp-harga');
 const inpSub     = document.getElementById('inp-subtotal');
 const panelBaru  = document.getElementById('panel-baru');
+const inpKet     = document.getElementById('inp-keterangan');
+const inpSatuanMain = document.getElementById('inp-satuan-main');
 
 function scoreMatch(query, target){
   const q = query.toLowerCase();
@@ -738,6 +1215,7 @@ async function lookupNama(nama){
     inpHarga.value = '';
     panelBaru.classList.remove('d-none');
     document.getElementById('inp-satuan').value = 'pcs';
+    inpSatuanMain.value = 'pcs';
   }
 }
 
@@ -751,6 +1229,7 @@ function applyProduk(p){
   const qty = parseInt(inpQty.value)||1;
   const harga = (qty>=p.min_gro&&p.min_gro>0) ? p.harga_gro : p.harga_ret;
   inpHarga.value = harga;
+  inpSatuanMain.value = (p.satuan || 'pcs').toLowerCase();
   updateSubtotal();
 }
 inpQty.addEventListener('input', ()=>{
@@ -788,8 +1267,10 @@ function tambahItem(){
   let hargaGro = parseFloat(document.getElementById('inp-gro').value)||0;
   let minGro   = parseInt(document.getElementById('inp-min-gro').value)||10;
   let satuan   = (document.getElementById('inp-satuan').value || 'pcs').trim().toLowerCase();
+  let satuanDraft = (inpSatuanMain.value || satuan || 'pcs').trim().toLowerCase();
   let harga    = parseFloat(inpHarga.value)||0;
   if(!satuan) satuan = 'pcs';
+  if(!satuanDraft) satuanDraft = satuan;
 
   if(isNew && harga<=0 && hargaRet>0) harga = hargaRet;
   if(isNew && hargaGro<=0) hargaGro = hargaRet||harga;
@@ -799,16 +1280,29 @@ function tambahItem(){
   let extra = {harga_ret:harga, harga_gro:harga, min_gro:10, satuan:'pcs', is_new:false};
   if(produkCache[key] && !isNew){
     extra = {...produkCache[key]};
+    // Fallback ke harga input form jika harga produk cache kosong/0.
+    if((parseFloat(extra.harga_ret)||0) <= 0 && harga > 0){
+      extra.harga_ret = harga;
+    }
+    if((parseFloat(extra.harga_gro)||0) <= 0){
+      extra.harga_gro = parseFloat(extra.harga_ret)||harga;
+    }
   } else if(isNew) {
     extra = {harga_ret:hargaRet||harga, harga_gro:hargaGro||harga, min_gro:minGro, satuan:satuan, is_new:true};
     produkCache[key] = {...extra};
   }
 
-  const isGrosir = (qty >= extra.min_gro && extra.min_gro > 0);
-  const hargaFinal = isGrosir ? extra.harga_gro : extra.harga_ret;
+  const hargaRetFinal = parseFloat(extra.harga_ret)||harga;
+  const hargaGroFinal = parseFloat(extra.harga_gro)||hargaRetFinal;
+  const minGroFinal   = parseInt(extra.min_gro)||10;
+  const isGrosir = (qty >= minGroFinal && minGroFinal > 0);
+  const hargaFinal = isGrosir ? hargaGroFinal : hargaRetFinal;
+  if(hargaFinal<=0) return showToast('Harga masih 0, cek data produk atau isi manual','danger');
+  const keterangan = inpKet.value.trim();
   items.push({nama, qty, harga:hargaFinal, subtotal:qty*hargaFinal,
-              harga_ret:extra.harga_ret, harga_gro:extra.harga_gro,
-              min_gro:extra.min_gro, satuan:extra.satuan || 'pcs', is_new:extra.is_new, isGrosir});
+              harga_ret:hargaRetFinal, harga_gro:hargaGroFinal,
+              min_gro:minGroFinal, satuan:satuanDraft || extra.satuan || 'pcs',
+              keterangan, is_new:extra.is_new, isGrosir});
   renderTable();
   saveDraft();
   showToast(nama+' ditambahkan ✓','success');
@@ -818,6 +1312,8 @@ function tambahItem(){
   document.getElementById('inp-gro').value='';
   document.getElementById('inp-min-gro').value=10;
   document.getElementById('inp-satuan').value='pcs';
+  inpSatuanMain.value='pcs';
+  inpKet.value='';
   inpNama.focus();
 }
 
@@ -833,18 +1329,38 @@ function renderTable(){
   const tbody = document.getElementById('tbl-items');
   let total=0, html='';
   items.forEach((it,i)=>{
+    recalcItem(i);
     total+=it.subtotal;
     html+=`<tr>
       <td>
-        <div style="font-weight:500">${esc(it.nama)}</div>
-        <small style="color:var(--text-muted)">
+        <input class="form-control form-control-sm" value="${esc(it.nama)}"
+               onchange="editItem(${i},'nama',this.value)">
+        <small style="color:var(--text-muted);display:block;margin-top:3px">
           ${it.isGrosir
             ? '<span class="badge-pill badge-grosir"><i class="bi bi-tag-fill me-1"></i>Grosir</span>'
             : '<span class="badge-pill badge-retail"><i class="bi bi-tag me-1"></i>Retail</span>'}
         </small>
       </td>
-      <td class="text-center fw-semibold">${it.qty} ${esc(it.satuan || 'pcs')}</td>
-      <td class="text-end" style="font-size:.82rem">Rp ${fmt(it.harga)}</td>
+      <td style="min-width:82px">
+        <input type="number" min="1" class="form-control form-control-sm text-center" value="${it.qty}"
+               onchange="editItem(${i},'qty',this.value)">
+      </td>
+      <td style="min-width:86px">
+        <input class="form-control form-control-sm text-center" value="${esc(it.satuan || 'pcs')}"
+               onchange="editItem(${i},'satuan',this.value)">
+      </td>
+      <td style="min-width:130px">
+        <input class="form-control form-control-sm" value="${esc(it.keterangan || '')}"
+               onchange="editItem(${i},'keterangan',this.value)">
+      </td>
+      <td style="min-width:125px">
+        <div class="input-group input-group-sm">
+          <span class="input-group-text">Rp</span>
+          <input type="number" min="0" class="form-control form-control-sm text-end" value="${it.harga}"
+                 onchange="editItem(${i},'harga',this.value)">
+        </div>
+      </td>
+      <td class="text-end fw-semibold" style="font-size:.82rem;min-width:95px">Rp ${fmt(it.subtotal)}</td>
       <td class="text-end">
         <button class="btn btn-sm btn-icon btn-outline-danger" onclick="hapusItem(${i})">
           <i class="bi bi-trash3"></i>
@@ -852,7 +1368,7 @@ function renderTable(){
       </td>
     </tr>`;
   });
-  if(!html) html=`<tr><td colspan="4" class="empty-state py-4">
+  if(!html) html=`<tr><td colspan="7" class="empty-state py-4">
     <i class="bi bi-cart-x d-block mb-2" style="font-size:1.5rem;opacity:.3"></i>
     <span style="font-size:.82rem">Belum ada item</span></td></tr>`;
   tbody.innerHTML = html;
@@ -860,17 +1376,64 @@ function renderTable(){
   document.getElementById('badge-count').textContent   = items.length+' item';
 }
 
+function editItem(idx, field, value){
+  if(!items[idx]) return;
+  if(field === 'qty'){
+    items[idx].qty = parseInt(value)||1;
+  } else if(field === 'harga'){
+    items[idx].harga = parseFloat(value)||0;
+    items[idx].harga_ret = items[idx].harga;
+    items[idx].harga_gro = items[idx].harga;
+  } else if(field === 'nama'){
+    items[idx].nama = (value||'').trim() || 'Tanpa Nama';
+  } else if(field === 'satuan'){
+    items[idx].satuan = ((value||'pcs')+'').trim().toLowerCase() || 'pcs';
+  } else {
+    items[idx].keterangan = (value||'').toString().trim();
+  }
+  recalcItem(idx);
+  saveDraft();
+  renderTable();
+}
+
+async function importExcelDraft(){
+  const file = document.getElementById('inp-excel').files[0];
+  if(!file) return showToast('Pilih file Excel dulu','warning');
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const res = await fetch('/api/import/excel', {method:'POST', body:fd});
+    const d = await res.json();
+    if(!d.ok) return showToast(d.msg || 'Import gagal','danger');
+    const imported = (d.items || []).map(normalizeItem).filter(it=>it.nama);
+    if(!imported.length) return showToast('Data item kosong','warning');
+    if(d.pelanggan){
+      document.getElementById('pelanggan').value = d.pelanggan;
+    }
+    if(d.tanggal){
+      document.getElementById('tanggal-nota').value = d.tanggal.replace(' ', 'T').slice(0,16);
+    }
+    importQueue = [...importQueue, ...imported];
+    renderImportQueue();
+    saveDraft();
+    showToast(imported.length + ' item masuk daftar import','success');
+  } catch(e){
+    showToast('Gagal baca Excel','danger');
+  }
+}
+
 // ── Simpan nota ───────────────────────────────────────────────────────────────
 async function simpanNota(){
   if(!items.length) return showToast('Tambahkan minimal 1 barang!','warning');
   const pelanggan = document.getElementById('pelanggan').value.trim();
+  const tanggal = document.getElementById('tanggal-nota').value;
   const btn = document.querySelector('[onclick="simpanNota()"]');
   btn.disabled=true;
   btn.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Menyimpan…';
   try{
     const res = await fetch('/api/simpan',{
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({pelanggan,items})
+      body:JSON.stringify({pelanggan,tanggal,items})
     });
     const d = await res.json();
     if(d.ok){
@@ -905,14 +1468,20 @@ async function resetForm(){
     showToast(produkBaru.length+' produk baru tersimpan ke database','info');
   }
   items=[];
+  importQueue=[];
+  renderImportQueue();
   renderTable();
   clearDraft();
   document.getElementById('pelanggan').value='';
+  document.getElementById('tanggal-nota').value='';
+  inpKet.value='';
+  inpSatuanMain.value='pcs';
   showToast('Form direset','info');
 }
 
 // Autosave pelanggan saat diketik
 document.getElementById('pelanggan').addEventListener('input', saveDraft);
+document.getElementById('tanggal-nota').addEventListener('input', saveDraft);
 
 // Enter navigation
 inpQty.addEventListener('keydown', e=>{
@@ -1002,6 +1571,10 @@ RIWAYAT_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block 
                 <a href="/pdf/{{ n.id }}" class="btn btn-sm btn-outline-danger btn-icon" title="PDF">
                   <i class="bi bi-file-pdf"></i>
                 </a>
+                <button class="btn btn-sm btn-outline-primary btn-icon" title="Edit No. Nota"
+                        onclick="editNomor({{ n.id }}, '{{ n.nomor }}')">
+                  <i class="bi bi-pencil-square"></i>
+                </button>
                 <button class="btn btn-sm btn-outline-secondary btn-icon" title="Hapus"
                         onclick="hapus({{ n.id }}, '{{ n.nomor }}')">
                   <i class="bi bi-trash3"></i>
@@ -1048,6 +1621,21 @@ async function hapus(id, nomor){
   const r = await fetch('/hapus/'+id,{method:'POST'});
   const d = await r.json();
   if(d.ok){ showToast('Nota '+nomor+' dihapus','warning'); setTimeout(()=>location.reload(),800); }
+}
+
+async function editNomor(id, nomorLama){
+  const contoh = '#009/OB/SMP/05/03/2026';
+  const nomorBaru = prompt('Edit No. Nota (format contoh: '+contoh+')', nomorLama || '');
+  if(nomorBaru===null) return;
+  const nomor = nomorBaru.trim();
+  if(!nomor) return showToast('No. nota tidak boleh kosong','warning');
+  const r = await fetch('/api/nota/edit-nomor/'+id, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({nomor})
+  });
+  const d = await r.json();
+  if(d.ok){ showToast('No. nota berhasil diubah','success'); setTimeout(()=>location.reload(),500); }
+  else showToast(d.msg || 'Gagal ubah nomor','danger');
 }
 </script>
 {% endblock %}""")
@@ -1427,10 +2015,18 @@ def init_db():
         nota_id INTEGER NOT NULL,
         nama TEXT NOT NULL,
         qty INTEGER NOT NULL,
+      satuan TEXT NOT NULL DEFAULT 'pcs',
+      keterangan TEXT,
         harga REAL NOT NULL,
         subtotal REAL NOT NULL,
         FOREIGN KEY (nota_id) REFERENCES nota(id)
     )''')
+    item_cols = [r[1] for r in cur.execute("PRAGMA table_info(item_nota)").fetchall()]
+    if 'satuan' not in item_cols:
+      cur.execute("ALTER TABLE item_nota ADD COLUMN satuan TEXT NOT NULL DEFAULT 'pcs'")
+    if 'keterangan' not in item_cols:
+      cur.execute("ALTER TABLE item_nota ADD COLUMN keterangan TEXT")
+    cur.execute("UPDATE item_nota SET satuan='pcs' WHERE satuan IS NULL OR TRIM(satuan)='' ")
     con.commit()
     con.close()
 
@@ -1442,12 +2038,21 @@ def get_con():
     return con
 
 def next_nomor():
-    today = datetime.now().strftime('%Y%m%d')
+    now = datetime.now()
+    dd = now.strftime('%d')
+    mm = now.strftime('%m')
+    yyyy = now.strftime('%Y')
+    suffix = f"/OB/SMP/{dd}/{mm}/{yyyy}"
     con = get_con()
-    row = con.execute("SELECT COUNT(*) as c FROM nota WHERE nomor LIKE ?",
-                      (f'NTA-{today}%',)).fetchone()
+    row = con.execute("SELECT nomor FROM nota WHERE nomor LIKE ?", (f"%{suffix}",)).fetchall()
     con.close()
-    return f"NTA-{today}-{row['c']+1:03d}"
+
+    max_seq = 0
+    for r in row:
+        m = re.match(r'^#?(\d{1,4})/OB/SMP/\d{2}/\d{2}/\d{4}$', (r['nomor'] or '').strip())
+        if m:
+            max_seq = max(max_seq, int(m.group(1)))
+    return f"#{max_seq + 1:03d}{suffix}"
 
 def render(template, **kw):
     kw.setdefault('ip', get_ip())
@@ -1515,7 +2120,7 @@ def detail(nota_id):
 @app.route('/api/produk/<nama>')
 def api_produk(nama):
     con = get_con()
-    row = con.execute("SELECT * FROM produk WHERE LOWER(nama)=LOWER(?)", (nama,)).fetchone()
+    row = find_produk_match_row(con, nama)
     con.close()
     if row:
         return jsonify({'found':True,'harga_ret':row['harga_ret'],
@@ -1560,95 +2165,286 @@ def api_produk_hapus(produk_id):
     con.commit(); con.close()
     return jsonify({'ok': True})
 
+
+@app.route('/api/import/excel', methods=['POST'])
+def api_import_excel():
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'ok': False, 'msg': 'File excel belum dipilih'})
+    try:
+        payload = parse_items_from_excel(file)
+        items = payload.get('items', [])
+
+        # Sinkronkan harga import dengan daftar produk yang sudah ada.
+        con = get_con()
+        for it in items:
+            row = find_produk_match_row(con, it.get('nama', ''))
+
+            if row:
+                qty = int(clean_number(it.get('qty'), 1)) or 1
+                min_gro = int(clean_number(row['min_gro'], 10)) or 10
+                harga_ret = clean_number(row['harga_ret'], 0)
+                harga_gro = clean_number(row['harga_gro'], harga_ret)
+                use_gro = qty >= min_gro and min_gro > 0
+                harga = harga_gro if use_gro else harga_ret
+
+                it['harga_ret'] = harga_ret
+                it['harga_gro'] = harga_gro
+                it['min_gro'] = min_gro
+                it['harga'] = harga
+                it['subtotal'] = qty * harga
+                it['satuan'] = normalize_space(row['satuan'] or it.get('satuan') or 'pcs').lower()
+                it['is_new'] = False
+                it['isGrosir'] = use_gro
+        con.close()
+
+        return jsonify({
+            'ok': True,
+            'items': items,
+            'count': len(items),
+            'pelanggan': payload.get('pelanggan', ''),
+            'tanggal': payload.get('tanggal', '')
+        })
+    except RuntimeError as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+    except Exception:
+        return jsonify({'ok': False, 'msg': 'Format excel tidak dikenali'})
+
 @app.route('/api/simpan', methods=['POST'])
 def api_simpan():
     data  = request.get_json()
     items = data.get('items', [])
     if not items: return jsonify({'ok':False,'msg':'Item kosong'})
     pelanggan = data.get('pelanggan','').strip()
-    tanggal   = datetime.now().strftime('%Y-%m-%d %H:%M')
+    tanggal_in = normalize_space(data.get('tanggal') or '')
+    tanggal = datetime.now().strftime('%Y-%m-%d %H:%M')
+    if tanggal_in:
+      parsed = None
+      for pat in ('%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+        try:
+          parsed = datetime.strptime(tanggal_in, pat)
+          break
+        except Exception:
+          pass
+      if parsed:
+        tanggal = parsed.strftime('%Y-%m-%d %H:%M')
     nomor     = next_nomor()
-    total     = sum(i['subtotal'] for i in items)
+    for idx, i in enumerate(items):
+      i['nama'] = normalize_space(i.get('nama'))
+      i['qty'] = int(clean_number(i.get('qty'), 1)) or 1
+      i['harga'] = clean_number(i.get('harga'), 0)
+      i['harga_ret'] = clean_number(i.get('harga_ret', i['harga']), i['harga'])
+      i['harga_gro'] = clean_number(i.get('harga_gro', i['harga_ret']), i['harga_ret'])
+      i['min_gro'] = int(clean_number(i.get('min_gro'), 10)) or 10
+      i['subtotal'] = i['qty'] * i['harga']
+      i['satuan'] = normalize_space(i.get('satuan') or 'pcs').lower()[:20] or 'pcs'
+      i['keterangan'] = normalize_space(i.get('keterangan') or '')[:120]
+      if not i['nama']:
+        i['nama'] = f'Item {idx+1}'
+    total = sum(i['subtotal'] for i in items)
     con = get_con(); cur = con.cursor()
     for i in items:
-      if i.get('is_new'):
-        satuan = (i.get('satuan') or 'pcs').strip().lower()[:20]
-        cur.execute('''INSERT INTO produk (nama,harga_ret,harga_gro,min_gro,satuan) VALUES (?,?,?,?,?)
-          ON CONFLICT(nama) DO UPDATE SET
-          harga_ret=excluded.harga_ret,harga_gro=excluded.harga_gro,min_gro=excluded.min_gro,satuan=excluded.satuan''',
-          (i['nama'], i['harga_ret'], i['harga_gro'], i['min_gro'], satuan or 'pcs'))
+      satuan = (i.get('satuan') or 'pcs').strip().lower()[:20]
+      cur.execute('''INSERT INTO produk (nama,harga_ret,harga_gro,min_gro,satuan) VALUES (?,?,?,?,?)
+        ON CONFLICT(nama) DO UPDATE SET
+        harga_ret=CASE WHEN excluded.harga_ret>0 THEN excluded.harga_ret ELSE produk.harga_ret END,
+        harga_gro=CASE WHEN excluded.harga_gro>0 THEN excluded.harga_gro ELSE produk.harga_gro END,
+        min_gro=CASE WHEN excluded.min_gro>0 THEN excluded.min_gro ELSE produk.min_gro END,
+        satuan=CASE
+          WHEN excluded.satuan IS NOT NULL AND TRIM(excluded.satuan)<>'' THEN excluded.satuan
+          ELSE produk.satuan
+        END''',
+        (i['nama'], i['harga_ret'], i['harga_gro'], i['min_gro'], satuan or 'pcs'))
     cur.execute("INSERT INTO nota (nomor,pelanggan,tanggal,total) VALUES (?,?,?,?)",
                 (nomor,pelanggan,tanggal,total))
     nota_id = cur.lastrowid
     for i in items:
-        cur.execute("INSERT INTO item_nota (nota_id,nama,qty,harga,subtotal) VALUES (?,?,?,?,?)",
-                    (nota_id,i['nama'],i['qty'],i['harga'],i['subtotal']))
+      cur.execute(
+        "INSERT INTO item_nota (nota_id,nama,qty,satuan,keterangan,harga,subtotal) VALUES (?,?,?,?,?,?,?)",
+        (nota_id, i['nama'], i['qty'], i['satuan'], i['keterangan'], i['harga'], i['subtotal'])
+      )
     con.commit(); con.close()
     return jsonify({'ok':True,'nota_id':nota_id,'nomor':nomor})
+
+@app.route('/api/nota/edit-nomor/<int:nota_id>', methods=['POST'])
+def api_nota_edit_nomor(nota_id):
+    data = request.get_json() or {}
+    nomor = normalize_space(data.get('nomor'))
+    if not nomor:
+      return jsonify({'ok': False, 'msg': 'Nomor tidak boleh kosong'})
+
+    con = get_con()
+    exists = con.execute(
+      "SELECT id FROM nota WHERE nomor=? AND id<>?",
+      (nomor, nota_id)
+    ).fetchone()
+    if exists:
+      con.close()
+      return jsonify({'ok': False, 'msg': 'Nomor sudah dipakai nota lain'})
+
+    con.execute("UPDATE nota SET nomor=? WHERE id=?", (nomor, nota_id))
+    con.commit()
+    con.close()
+    return jsonify({'ok': True})
 
 @app.route('/pdf/<int:nota_id>')
 def pdf_route(nota_id):
     con = get_con()
-    nota  = con.execute("SELECT * FROM nota WHERE id=?", (nota_id,)).fetchone()
+    nota = con.execute("SELECT * FROM nota WHERE id=?", (nota_id,)).fetchone()
     items = con.execute("SELECT * FROM item_nota WHERE nota_id=?", (nota_id,)).fetchall()
     con.close()
-    if not nota: return "Nota tidak ditemukan", 404
-    p = FPDF()
+    if not nota:
+        return "Nota tidak ditemukan", 404
+
+    logo_kop = find_asset_image('logokop')
+    logo_cap = find_asset_image('logocap')
+    logo_ttd = find_asset_image('ttd')
+
+    p = FPDF('P', 'mm', 'A4')
+    p.set_auto_page_break(auto=True, margin=12)
     p.add_page()
-    p.set_margins(15, 15, 15)
-    # Kop
-    p.set_font('Arial','B',18)
-    p.cell(0,9,'SMART NOTA PORTABLE',ln=True,align='C')
-    p.set_font('Arial','',10)
-    p.cell(0,5,'Nota Penjualan Resmi',ln=True,align='C')
+    p.set_margins(0, 0, 0)
+    p.set_line_width(0.2)
+
+    # Panel kiri
+    p.set_fill_color(238, 238, 238)
+    p.rect(0, 0, 48, 297, style='F')
+    p.set_fill_color(247, 198, 0)
+    p.rect(48, 0, 7.2, 297, style='F')
+    p.set_fill_color(45, 208, 227)
+    p.rect(50.9, 37.5, 4.0, 230, style='F')
+
+    if logo_kop:
+      p.image(logo_kop, x=3.8, y=8.8, w=42.8)
+
+    pelanggan = normalize_space(nota['pelanggan'] or 'UMUM')
+    p.set_text_color(62, 62, 62)
+    p.set_xy(7.5, 49.3)
+    p.set_font('Arial', 'B', 8.8)
+    p.cell(38, 5, 'Tagihan Untuk :')
+    p.set_xy(7.5, 56.0)
+    p.set_font('Arial', 'B', 10.2)
+    p.multi_cell(38, 6, pelanggan.upper())
+
+    p.set_xy(7.5, 231)
+    p.set_font('Arial', 'B', 8.5)
+    p.cell(38, 4.8, 'Contact Person :')
+    p.set_xy(7.5, 238)
+    p.set_font('Arial', '', 9.2)
+    p.multi_cell(38, 5, 'Reynold Andika\n0817-4173-826')
+
+    # Konten kanan
+    content_x = 61.5
+    content_w = 141.5
+    p.set_text_color(241, 178, 0)
+    p.set_font('Arial', '', 30)
+    p.set_xy(content_x, 16)
+    p.cell(content_w, 11, 'Invoice', align='R')
+
+    p.set_text_color(70, 70, 70)
+    p.set_font('Arial', 'B', 10.3)
+    p.set_xy(content_x, 37.5)
+    nomor_tampil = str(nota['nomor'] or '').strip()
+    if not nomor_tampil.startswith('#'):
+      nomor_tampil = '#' + nomor_tampil
+    p.cell(content_w, 6, f"Invoice : {nomor_tampil}", align='R')
+
+    intro = (
+        f"Berikut terlampir Invoice untuk {pelanggan.upper()} atas permintaan alat tulis terlampir. "
+        f"Pengiriman dilakukan pada tanggal {nota['tanggal']} dengan perincian sebagai berikut:"
+    )
+    p.set_xy(content_x, 55)
+    p.set_font('Arial', '', 10.5)
+    p.multi_cell(content_w, 7, intro)
+
+    table_y = p.get_y() + 1.5
+    widths = [10, 56, 13, 17, 21, 24.5]
+    headers = ['NO', 'NAMA BARANG', 'QTY', 'SATUAN', 'HARGA JUAL', 'TOTAL']
+    p.set_xy(content_x, table_y)
+    p.set_font('Arial', 'B', 9.4)
+    p.set_fill_color(233, 233, 233)
+    for w, h in zip(widths, headers):
+        p.cell(w, 7, h, border=1, align='C', fill=True)
+    p.ln(7)
+
+    p.set_font('Arial', '', 9.1)
+    for idx, it in enumerate(items, 1):
+        if p.get_y() > 232:
+            p.add_page()
+            p.set_fill_color(233, 233, 233)
+            p.set_xy(content_x, 16)
+            p.set_font('Arial', 'B', 9.4)
+            for w, h in zip(widths, headers):
+                p.cell(w, 7, h, border=1, align='C', fill=True)
+            p.ln(7)
+            p.set_font('Arial', '', 9.1)
+
+        satuan = normalize_space(it['satuan'] if 'satuan' in it.keys() else 'pcs') or 'pcs'
+        ket = normalize_space(it['keterangan'] if 'keterangan' in it.keys() else '')
+        nama = normalize_space(it['nama'])
+        if ket:
+            nama = f"{nama} {ket}"[:34]
+        if len(nama) > 34:
+            nama = nama[:31] + '...'
+
+        p.set_x(content_x)
+        p.cell(widths[0], 6.4, str(idx), border=1, align='C')
+        p.cell(widths[1], 6.4, nama, border=1)
+        p.cell(widths[2], 6.4, str(it['qty']), border=1, align='C')
+        p.cell(widths[3], 6.4, satuan.upper(), border=1, align='C')
+        p.cell(widths[4], 6.4, f"Rp {fmt_rp(it['harga'])}", border=1, align='R')
+        p.cell(widths[5], 6.4, f"Rp {fmt_rp(it['subtotal'])}", border=1, align='R')
+        p.ln(6.4)
+
+    p.set_font('Arial', 'B', 9.6)
+    p.set_x(content_x)
+    p.cell(sum(widths[:-1]), 6.8, 'TOTAL', border=1, align='R', fill=True)
+    p.cell(widths[-1], 6.8, f"Rp {fmt_rp(nota['total'])}", border=1, align='R', fill=True)
+
+    p.ln(10)
+    p.set_font('Arial', '', 10.2)
+    p.set_x(content_x)
+    p.cell(content_w, 6, f"Total ternilai Rp {fmt_rp(nota['total'])},-", ln=True)
+    p.set_x(content_x)
+    p.cell(content_w, 6, f"Terbilang : {terbilang_id(nota['total'])}", ln=True)
+
     p.ln(2)
-    p.set_draw_color(79,70,229)
-    p.set_line_width(0.8)
-    p.line(15,p.get_y(),195,p.get_y())
-    p.ln(5)
-    # Info
-    p.set_font('Arial','',10)
-    p.cell(40,6,'No. Nota',border=0); p.cell(5,6,':',border=0); p.cell(0,6,nota['nomor'],ln=True)
-    p.cell(40,6,'Tanggal',border=0); p.cell(5,6,':',border=0); p.cell(0,6,nota['tanggal'],ln=True)
-    p.cell(40,6,'Pelanggan',border=0); p.cell(5,6,':',border=0); p.cell(0,6,nota['pelanggan'] or '-',ln=True)
-    p.ln(5)
-    # Header tabel
-    p.set_font('Arial','B',10)
-    p.set_fill_color(79,70,229); p.set_text_color(255,255,255)
-    p.cell(8,8,'No',border=1,align='C',fill=True)
-    p.cell(75,8,'Nama Barang',border=1,align='C',fill=True)
-    p.cell(20,8,'Qty',border=1,align='C',fill=True)
-    p.cell(35,8,'Harga',border=1,align='C',fill=True)
-    p.cell(42,8,'Subtotal',border=1,align='C',fill=True,ln=True)
-    # Rows
-    p.set_font('Arial','',10); p.set_text_color(0,0,0); p.set_fill_color(238,242,255)
-    for idx,it in enumerate(items,1):
-        fill=(idx%2==0)
-        p.cell(8,7,str(idx),border=1,align='C',fill=fill)
-        p.cell(75,7,it['nama'],border=1,fill=fill)
-        p.cell(20,7,str(it['qty']),border=1,align='C',fill=fill)
-        p.cell(35,7,f"Rp {it['harga']:,.0f}",border=1,align='R',fill=fill)
-        p.cell(42,7,f"Rp {it['subtotal']:,.0f}",border=1,align='R',fill=fill,ln=True)
-    # Total
-    p.set_font('Arial','B',11)
-    p.set_fill_color(79,70,229); p.set_text_color(255,255,255)
-    p.cell(138,9,'TOTAL',border=1,align='R',fill=True)
-    p.cell(42,9,f"Rp {nota['total']:,.0f}",border=1,align='R',fill=True,ln=True)
-    p.set_text_color(0,0,0)
-    p.ln(15)
-    # TTD
-    p.set_font('Arial','',10)
-    xl,xr,yn=15,120,p.get_y()
-    p.set_xy(xl,yn); p.cell(60,6,'Hormat Kami,',align='C')
-    p.set_xy(xr,yn); p.cell(60,6,'Penerima,',align='C')
-    p.ln(22); yn=p.get_y()
-    p.set_xy(xl,yn); p.cell(60,6,'( _________________ )',align='C')
-    p.set_xy(xr,yn); p.cell(60,6,'( _________________ )',align='C')
-    tmp = tempfile.NamedTemporaryFile(delete=False,suffix='.pdf')
-    p.output(tmp.name); tmp.close()
-    return send_file(tmp.name, as_attachment=True,
-                     download_name=f"nota-{nota['nomor']}.pdf",
-                     mimetype='application/pdf')
+    p.set_x(content_x)
+    p.set_draw_color(64, 214, 236)
+    p.set_fill_color(196, 228, 244)
+    box_y = p.get_y()
+    p.rect(content_x, box_y, content_w, 10, style='DF')
+    p.set_xy(content_x, box_y + 1.1)
+    p.set_font('Arial', 'BI', 10)
+    p.cell(content_w, 4, 'BCA an Reynold Andika Sanjoto', align='C', ln=True)
+    p.set_x(content_x)
+    p.set_font('Arial', '', 10)
+    p.cell(content_w, 4, '4090391521', align='C', ln=True)
+    p.set_x(content_x)
+    p.set_font('Arial', 'B', 11.5)
+    p.cell(content_w, 7, 'TERIMA KASIH ATAS KERJASAMANYA', align='C', ln=True)
+
+    sign_y = min(p.get_y() + 3, 255)
+    ttd_x = content_x + 12
+    ttd_w = 30
+    if logo_ttd:
+      p.image(logo_ttd, x=ttd_x, y=sign_y, w=ttd_w)
+    p.set_xy(ttd_x, sign_y + 21)
+    p.set_font('Arial', '', 9.8)
+    p.cell(ttd_w, 5, 'Reynold Andika', align='C')
+
+    if logo_cap:
+        p.image(logo_cap, x=content_x + content_w - 34, y=sign_y + 2, w=26)
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+    p.output(tmp.name)
+    tmp.close()
+    return send_file(
+        tmp.name,
+        as_attachment=True,
+        download_name=f"nota-{nota['nomor']}.pdf",
+        mimetype='application/pdf'
+    )
 
 @app.route('/hapus/<int:nota_id>', methods=['POST'])
 def hapus(nota_id):

@@ -2,6 +2,34 @@
 
 ---
 
+## v1.1.0 — Template, Import Excel, dan Stabilitas Build
+
+**Tanggal:** 2026-03-09
+
+### ✅ Highlight Update
+
+- **Template PDF Lebih Presisi** — Layout invoice dituning agar lebih mendekati template referensi.
+- **Auto Asset dari Folder `img`** — `LOGOKOP`, `LOGOCAP`, dan `TTD` otomatis dipakai saat generate PDF.
+- **Import Excel** — Bisa import multi item dari Excel dengan parsing data lebih toleran.
+- **Auto Baca Customer & Tanggal** — Data pelanggan/tanggal dari Excel ikut terisi ke form nota.
+- **Import Queue** — Item import masuk antrean dulu untuk direview sebelum dimasukkan ke nota.
+- **Nomor Nota Baru** — Format jadi `#NNN/OB/SMP/DD/MM/YYYY`.
+- **Edit Nomor dari Riwayat** — Nomor nota bisa diubah dari halaman riwayat dengan validasi duplikasi.
+- **Simpan Produk Sinkron** — Nama produk hasil edit di draft ikut di-upsert ke daftar produk.
+- **Build EXE Lebih Aman** — Konfigurasi PyInstaller diperbarui agar folder `img` ikut ter-bundle.
+
+### 🛠️ Perbaikan Penting
+
+- Perbaikan kasus **harga satuan = 0** pada flow import -> form -> tambah item.
+- Perbaikan logika match nama produk saat import (normalisasi + fallback).
+- Perbaikan stabilitas path asset saat app berjalan dalam mode `.exe`.
+
+### 📦 Dependency
+
+- Tambahan: `openpyxl>=3.1`
+
+---
+
 ## v1.0.0 — Initial Release
 
 **Tanggal:** 2026-03-07
