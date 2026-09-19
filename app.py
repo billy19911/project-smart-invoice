@@ -2996,6 +2996,42 @@ PORT = 5000
 # Referensi server aktif agar bisa di-restart / di-stop dari tray.
 _server = None
 _server_lock = None  # diinisialisasi di main
+_shutting_down = False  # penanda agar shutdown tidak dobel
+
+
+def _request_shutdown():
+    """Minta server aktif berhenti dengan bersih (dipakai tray & instance baru)."""
+    global _shutting_down
+    if _shutting_down:
+        return False
+    _shutting_down = True
+    srv = _server
+    if srv is None:
+        return False
+    try:
+        srv.shutdown()
+    except Exception:
+        pass
+    return True
+
+
+@app.route('/api/shutdown', methods=['POST'])
+def api_shutdown():
+    """Hentikan aplikasi. Hanya boleh dari localhost (dipakai instance baru)."""
+    if request.remote_addr not in ('127.0.0.1', '::1'):
+        return jsonify({'ok': False, 'msg': 'Tidak diizinkan'}), 403
+
+    def _later():
+        import time
+        time.sleep(0.3)
+        _request_shutdown()
+        # beri jeda agar respons terkirim & proses lama benar-benar berhenti
+        time.sleep(0.3)
+        os._exit(0)
+
+    import threading
+    threading.Thread(target=_later, daemon=True).start()
+    return jsonify({'ok': True, 'msg': 'Server dimatikan'})
 
 
 def _start_flask_server():
@@ -3035,19 +3071,39 @@ def buat_ikon():
 
 
 def main():
-    global _server_lock
+    global _server_lock, _shutting_down
     import threading, webbrowser, time, socket as _s
 
     _server_lock = threading.Lock()
+    _shutting_down = False
     ip  = get_ip()
     url = 'http://127.0.0.1:5000'
 
-    # Cegah instance ganda: kalau ada server yang sudah melayani di port ini,
-    # ini instance kedua -> cukup buka browser lalu keluar.
-    def _single_instance_guard():
-        return _port_in_use('127.0.0.1', PORT)
+    # ── Kalau sudah ada instance berjalan: minta dia berhenti dulu ────────────
+    # (data sudah tersimpan karena setiap request selalu commit ke SQLite),
+    # lalu instance baru ini yang menggantikannya.
+    def _stop_existing_instance():
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                f'http://127.0.0.1:{PORT}/api/shutdown',
+                data=b'', method='POST'
+            )
+            urllib.request.urlopen(req, timeout=3).read()
+        except Exception:
+            pass
+        # tunggu sampai port benar-benar lepas (maks ~10 detik)
+        for _ in range(100):
+            if not _port_in_use():
+                return True
+            time.sleep(0.1)
+        return False
 
-    if _single_instance_guard():
+    if _port_in_use():
+        _stop_existing_instance()
+
+    # Kalau masih terpakai (gagal minta shutdown) -> jangan bentrok, cukup buka browser.
+    if _port_in_use():
         try:
             webbrowser.open(url)
         except Exception:
@@ -3073,9 +3129,9 @@ def main():
 
     def stop_server():
         """Hentikan server aktif dengan aman."""
-        global _server
-        with _server_lock:
-            srv = _server
+        global _shutting_down
+        _shutting_down = True
+        srv = _server
         if srv is not None:
             try: srv.shutdown()
             except Exception: pass
@@ -3084,6 +3140,7 @@ def main():
             if not _port_in_use():
                 break
             time.sleep(0.1)
+        _shutting_down = False
 
     try:
         import pystray

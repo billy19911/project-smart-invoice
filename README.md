@@ -40,8 +40,12 @@ Aplikasi kasir / nota penjualan berbasis web yang berjalan lokal di laptop — b
 - 🔄 **Restart Server** — restart server tanpa menutup aplikasi
 - ⏹ **Stop Server** — matikan server & tutup aplikasi
 
-> Aplikasi hanya berjalan satu instance. Membuka `SmartNota.exe` lagi saat sudah
-> berjalan tidak akan membuat server kedua — hanya membuka browser.
+Selama aplikasi belum di-**Stop**, server tetap hidup di background sehingga
+bisa dibuka kapan saja dari browser (`http://localhost:5000`).
+
+> **Buka ulang `SmartNota.exe` saat masih berjalan?** Aplikasi lama otomatis
+> dihentikan (data sudah tersimpan di database) lalu instance baru dijalankan
+> dan browser dibuka — jadi tidak ada server ganda.
 
 ---
 
