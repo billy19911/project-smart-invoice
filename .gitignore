@@ -18,6 +18,8 @@ upx.zip
 # Backup
 app_backup.py
 _fix.py
+smartnota.db.bak_gui_check
+*.db.bak*
 
 # Env
 .env

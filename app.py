@@ -42,10 +42,33 @@ def normalize_space(text):
 def clean_number(value, default=0.0):
     if value is None:
         return default
+    if isinstance(value, bool):
+        return float(value)
     if isinstance(value, (int, float)):
         return float(value)
-    s = str(value).strip().replace('Rp', '').replace('rp', '')
-    s = s.replace('.', '').replace(',', '.')
+    s = str(value).strip().replace('Rp', '').replace('rp', '').replace(' ', '')
+    if not s:
+        return default
+
+    has_dot = '.' in s
+    has_comma = ',' in s
+
+    if has_dot and has_comma:
+        # Format Indonesia: titik ribuan, koma desimal -> "1.500,50"
+        s = s.replace('.', '').replace(',', '.')
+    elif has_comma:
+        # Koma: desimal jika bukan pemisah ribuan ("1,5" -> 1.5 ; "1,500" -> 1500)
+        if re.fullmatch(r'\d{1,3}(,\d{3})+', s):
+            s = s.replace(',', '')
+        else:
+            s = s.replace(',', '.')
+    elif has_dot:
+        # Titik: ribuan jika pola grup ribuan ("12.500" -> 12500),
+        # selain itu desimal ("12.5" -> 12.5)
+        if re.fullmatch(r'\d{1,3}(\.\d{3})+', s):
+            s = s.replace('.', '')
+        # else: biarkan titik sebagai desimal
+
     try:
         return float(s)
     except Exception:
@@ -458,6 +481,15 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);margi
 .badge-retail{background:#e0f2fe;color:#0369a1}
 .badge-nota{background:#f1f5f9;color:#475569;font-family:monospace;font-size:.78rem;padding:3px 8px;border-radius:4px}
 
+/* ── Pagination ── */
+.pagination .page-link{
+  color:var(--accent);border-color:var(--border);font-size:.8rem;
+  border-radius:6px;margin:0 2px;padding:5px 10px;min-width:32px;text-align:center
+}
+.pagination .page-link:hover{background:var(--accent-light);border-color:var(--accent)}
+.pagination .page-item.active .page-link{background:var(--accent);border-color:var(--accent);color:#fff}
+.pagination .page-item.disabled .page-link{color:var(--text-muted);opacity:.5;background:transparent}
+
 /* ── Alert new product ── */
 .panel-baru{
   background:linear-gradient(135deg,#fffbeb,#fef3c7);
@@ -600,7 +632,7 @@ function showToast(msg, type='success'){
   setTimeout(()=>el.remove(), 3500);
 }
 function fmt(n){return Number(n).toLocaleString('id-ID')}
-function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 </script>
 {% block scripts %}{% endblock %}
 </body>
@@ -957,9 +989,20 @@ function normalizeItem(raw){
 
 function recalcItem(idx){
   if(!items[idx]) return;
-  items[idx].qty = Math.max(parseInt(items[idx].qty)||1, 1);
-  items[idx].harga = Math.max(parseFloat(items[idx].harga)||0, 0);
-  items[idx].subtotal = items[idx].qty * items[idx].harga;
+  const it = items[idx];
+  it.qty = Math.max(parseInt(it.qty)||1, 1);
+  const ret = parseFloat(it.harga_ret)||0;
+  const gro = parseFloat(it.harga_gro)||0;
+  const minGro = parseInt(it.min_gro)||10;
+  // Terapkan ulang harga tier jika tier tersedia, agar subtotal konsisten dengan qty.
+  if(ret > 0 || gro > 0){
+    const useGro = minGro > 0 && it.qty >= minGro;
+    it.isGrosir = useGro;
+    it.harga = useGro ? (gro || ret) : (ret || gro);
+  } else {
+    it.harga = Math.max(parseFloat(it.harga)||0, 0);
+  }
+  it.subtotal = it.qty * it.harga;
 }
 
 // ── Restore draft dari localStorage ──────────────────────────────────────────
@@ -975,6 +1018,10 @@ function recalcItem(idx){
       renderTable();
       showToast('Draft tersimpan dipulihkan ✓','info');
     }
+    if(d.importQueue && d.importQueue.length > 0){
+      importQueue = d.importQueue.map(normalizeItem).filter(it=>it.nama);
+      renderImportQueue();
+    }
   } catch(e){}
 })();
 
@@ -983,7 +1030,8 @@ function saveDraft(){
     localStorage.setItem(DRAFT_KEY, JSON.stringify({
       pelanggan: document.getElementById('pelanggan').value,
       tanggal: document.getElementById('tanggal-nota').value,
-      items
+      items,
+      importQueue
     }));
   } catch(e){}
 }
@@ -1086,15 +1134,51 @@ async function addImportItemToPreview(idx){
   renderImportQueue();
 }
 
-async function addAllImportedToPreview(){
+function addAllImportedToPreview(){
   if(!importQueue.length) return;
-  const total = importQueue.length;
-  while(importQueue.length){
-    // Gunakan flow tambah barang agar perhitungan harga konsisten.
-    await addImportItemToPreview(0);
+
+  // Ambil snapshot lalu kosongkan queue agar pemrosesan tidak mengubah sumber iterasi.
+  const snapshot = importQueue.slice();
+  importQueue = [];
+
+  // Gabungkan baris dengan nama sama (qty dijumlahkan) agar tidak dobel di preview.
+  const merged = new Map();
+  snapshot.forEach(raw=>{
+    const it = normalizeItem(raw);
+    if(!it.nama) return;
+    const key = it.nama.toLowerCase();
+    const existing = merged.get(key);
+    if(existing){
+      existing.qty += it.qty;
+      existing.subtotal = existing.qty * existing.harga;
+    } else {
+      merged.set(key, it);
+    }
+  });
+
+  let hargaNol = 0;
+  for(const it of merged.values()){
+    if((parseFloat(it.harga)||0) <= 0) hargaNol++;
+    items.push(it);
+    // Isi cache supaya konsistensi saat edit tanpa perlu fetch ulang.
+    if(!produkCache[it.nama.toLowerCase()]){
+      produkCache[it.nama.toLowerCase()] = {
+        harga_ret: it.harga_ret, harga_gro: it.harga_gro,
+        min_gro: it.min_gro, satuan: it.satuan, is_new: it.is_new
+      };
+    }
   }
+
+  // Satu kali render + satu kali simpan draft (bukan per item).
+  renderTable();
+  saveDraft();
   renderImportQueue();
-  showToast(total+' item dipindah lewat Tambah Barang','success');
+
+  const total = merged.size;
+  showToast(total+' item dimasukkan ke Preview via Tambah Barang','success');
+  if(hargaNol > 0){
+    showToast(hargaNol+' item harga masih 0, cek manual di Preview','warning');
+  }
 }
 
 // ── Fuzzy/contains search ─────────────────────────────────────────────────────
@@ -1376,7 +1460,7 @@ function renderTable(){
   document.getElementById('badge-count').textContent   = items.length+' item';
 }
 
-function editItem(idx, field, value){
+async function editItem(idx, field, value){
   if(!items[idx]) return;
   if(field === 'qty'){
     items[idx].qty = parseInt(value)||1;
@@ -1385,7 +1469,12 @@ function editItem(idx, field, value){
     items[idx].harga_ret = items[idx].harga;
     items[idx].harga_gro = items[idx].harga;
   } else if(field === 'nama'){
-    items[idx].nama = (value||'').trim() || 'Tanpa Nama';
+    const namaBaru = (value||'').trim() || 'Tanpa Nama';
+    const namaLama = items[idx].nama;
+    items[idx].nama = namaBaru;
+    if(namaBaru.toLowerCase() !== (namaLama||'').toLowerCase()){
+      await relookupItemPrice(idx, namaBaru);
+    }
   } else if(field === 'satuan'){
     items[idx].satuan = ((value||'pcs')+'').trim().toLowerCase() || 'pcs';
   } else {
@@ -1394,6 +1483,44 @@ function editItem(idx, field, value){
   recalcItem(idx);
   saveDraft();
   renderTable();
+}
+
+// Cari ulang harga tier produk saat nama item diubah di preview.
+async function relookupItemPrice(idx, nama){
+  const it = items[idx];
+  if(!it) return;
+  const qty = Math.max(parseInt(it.qty)||1, 1);
+  let d = null;
+  try {
+    const res = await fetch('/api/produk/'+encodeURIComponent(nama));
+    d = await res.json();
+  } catch(e){ d = null; }
+
+  if(d && d.found){
+    const minGro   = parseInt(d.min_gro)||10;
+    const hargaRet = parseFloat(d.harga_ret)||0;
+    const hargaGro = parseFloat(d.harga_gro)||hargaRet;
+    const useGro   = qty >= minGro && minGro > 0;
+    const harga    = useGro ? hargaGro : hargaRet;
+    it.harga_ret = hargaRet || it.harga;
+    it.harga_gro = hargaGro || it.harga_ret;
+    it.min_gro   = minGro;
+    it.satuan    = (d.satuan || it.satuan || 'pcs').toLowerCase();
+    it.is_new    = false;
+    it.isGrosir  = useGro;
+    if(harga > 0){
+      it.harga = harga;
+      it.subtotal = qty * harga;
+    } else {
+      it.subtotal = qty * (parseFloat(it.harga)||0);
+    }
+  } else {
+    // Produk belum ada: tandai sebagai baru, pertahankan harga lama agar data tidak hilang.
+    it.is_new = true;
+    it.isGrosir = false;
+    if(!(parseFloat(it.harga_ret) > 0)) it.harga_ret = parseFloat(it.harga)||0;
+    showToast(nama+' belum ada di daftar produk — cek harga','warning');
+  }
 }
 
 async function importExcelDraft(){
@@ -1684,14 +1811,14 @@ DETAIL_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block c
               <th class="text-end">Harga</th><th class="text-end">Subtotal</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="detail-items-body">
             {% for it in items %}
             <tr>
               <td style="color:var(--text-muted)">{{ loop.index }}</td>
               <td>
                 <div style="font-weight:500">{{ it.nama }}</div>
               </td>
-              <td class="text-center fw-semibold">{{ it.qty }}</td>
+              <td class="text-center fw-semibold">{{ it.qty }} {{ it.satuan or 'pcs' }}</td>
               <td class="text-end" style="font-size:.85rem">Rp {{ '{:,.0f}'.format(it.harga).replace(',','.') }}</td>
               <td class="text-end fw-semibold">Rp {{ '{:,.0f}'.format(it.subtotal).replace(',','.') }}</td>
             </tr>
@@ -1735,7 +1862,11 @@ DETAIL_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block c
         </div>
         <div class="d-flex justify-content-between mb-3">
           <span style="font-size:.85rem;color:var(--text-muted)">Total Qty</span>
-          <strong>{{ items|sum(attribute='qty') }} pcs</strong>
+          <strong class="text-end">
+            {% if qty_per_satuan %}
+              {% for sat, q in qty_per_satuan %}{{ q }} {{ sat }}{% if not loop.last %}, {% endif %}{% endfor %}
+            {% else %}–{% endif %}
+          </strong>
         </div>
         <div class="total-row">
           <span class="label">TOTAL</span>
@@ -1748,6 +1879,13 @@ DETAIL_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block c
         <h6><i class="bi bi-download me-2"></i>Ekspor</h6>
       </div>
       <div class="card-body-custom d-flex flex-column gap-2">
+        <button class="btn btn-outline-primary d-flex align-items-center gap-2 no-print" onclick="bukaEditNota()" id="btn-edit-nota">
+          <i class="bi bi-pencil-square fs-5"></i>
+          <div class="text-start">
+            <div style="font-size:.85rem">Edit Nota</div>
+            <small class="fw-normal" style="font-size:.72rem;opacity:.8">Ubah pelanggan &amp; item</small>
+          </div>
+        </button>
         <button class="btn btn-outline-secondary d-flex align-items-center gap-2 no-print" onclick="window.print()">
           <i class="bi bi-printer fs-5"></i>
           <div class="text-start">
@@ -1773,7 +1911,193 @@ DETAIL_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block c
     </div>
   </div>
 </div>
-{% endblock %}""").replace('{% block scripts %}{% endblock %}', '{% block scripts %}{% endblock %}')
+
+<!-- Panel Edit Nota -->
+<div class="card mt-3 d-none no-print" id="panel-edit-nota">
+  <div class="card-header-custom">
+    <h6><i class="bi bi-pencil-square me-2 text-primary"></i>Edit Nota</h6>
+    <button type="button" class="btn-close" onclick="tutupEditNota()"></button>
+  </div>
+  <div class="card-body-custom">
+    <div class="row g-3 mb-3">
+      <div class="col-md-7">
+        <label class="form-label">Nama Pelanggan</label>
+        <input type="text" id="edit-pelanggan" class="form-control"
+               placeholder="Opsional – kosongkan jika umum">
+      </div>
+      <div class="col-md-5">
+        <label class="form-label">Tanggal Nota</label>
+        <input type="datetime-local" id="edit-tanggal" class="form-control">
+      </div>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table-custom mb-2">
+        <thead>
+          <tr>
+            <th style="min-width:160px">Nama Barang</th>
+            <th class="text-center" style="width:80px">Qty</th>
+            <th class="text-center" style="width:100px">Satuan</th>
+            <th style="min-width:130px">Keterangan</th>
+            <th class="text-end" style="width:140px">Harga</th>
+            <th class="text-end" style="width:120px">Subtotal</th>
+            <th style="width:44px"></th>
+          </tr>
+        </thead>
+        <tbody id="edit-items-body"></tbody>
+      </table>
+    </div>
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+      <button class="btn btn-sm btn-outline-primary" onclick="tambahBarisEdit()">
+        <i class="bi bi-plus-lg me-1"></i>Tambah Baris
+      </button>
+      <div class="total-row" style="margin-top:0;flex:1;max-width:280px">
+        <span class="label">TOTAL</span>
+        <span class="amount" style="font-size:1.1rem" id="edit-total">Rp 0</span>
+      </div>
+    </div>
+
+    <div class="d-flex gap-2 justify-content-end">
+      <button class="btn btn-outline-secondary" onclick="tutupEditNota()">Batal</button>
+      <button class="btn btn-primary" id="btn-simpan-edit" onclick="simpanEditNota()">
+        <i class="bi bi-save me-1"></i>Simpan Perubahan
+      </button>
+    </div>
+  </div>
+</div>
+{% endblock %}""").replace('{% block scripts %}{% endblock %}', """{% block scripts %}
+<script>
+const NOTA_ID = {{ nota.id }};
+
+// Data item awal dari server (untuk mengisi form edit).
+const editItems = [
+  {% for it in items %}
+  {
+    nama: {{ it.nama|tojson }},
+    qty: {{ it.qty }},
+    satuan: {{ (it.satuan or 'pcs')|tojson }},
+    keterangan: {{ (it.keterangan or '')|tojson }},
+    harga: {{ it.harga }},
+    harga_ret: {{ it.harga }},
+    harga_gro: {{ it.harga }},
+    min_gro: 10
+  }{% if not loop.last %},{% endif %}
+  {% endfor %}
+];
+
+function bukaEditNota(){
+  document.getElementById('edit-pelanggan').value = {{ (nota.pelanggan or '')|tojson }};
+  const tgl = {{ (nota.tanggal or '')|tojson }}.replace(' ', 'T').slice(0,16);
+  document.getElementById('edit-tanggal').value = tgl;
+  renderEditRows();
+  document.getElementById('panel-edit-nota').classList.remove('d-none');
+  document.getElementById('btn-edit-nota').classList.add('d-none');
+  document.getElementById('nota-print').classList.add('d-none');
+  document.getElementById('panel-edit-nota').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function tutupEditNota(){
+  document.getElementById('panel-edit-nota').classList.add('d-none');
+  document.getElementById('btn-edit-nota').classList.remove('d-none');
+  document.getElementById('nota-print').classList.remove('d-none');
+}
+
+function renderEditRows(){
+  const body = document.getElementById('edit-items-body');
+  if(!editItems.length){
+    body.innerHTML = '<tr><td colspan="7" class="text-center py-3" style="color:var(--text-muted);font-size:.85rem">Belum ada item. Klik "Tambah Baris".</td></tr>';
+    updateEditTotal();
+    return;
+  }
+  body.innerHTML = editItems.map((it,i)=>`
+    <tr>
+      <td><input class="form-control form-control-sm" value="${esc(it.nama)}"
+            onchange="editItemBaris(${i},'nama',this.value)"></td>
+      <td><input type="number" min="1" class="form-control form-control-sm text-center" value="${it.qty}"
+            onchange="editItemBaris(${i},'qty',this.value)"></td>
+      <td><input class="form-control form-control-sm text-center" value="${esc(it.satuan||'pcs')}"
+            onchange="editItemBaris(${i},'satuan',this.value)"></td>
+      <td><input class="form-control form-control-sm" value="${esc(it.keterangan||'')}"
+            onchange="editItemBaris(${i},'keterangan',this.value)"></td>
+      <td><div class="input-group input-group-sm">
+            <span class="input-group-text">Rp</span>
+            <input type="number" min="0" class="form-control form-control-sm text-end" value="${it.harga}"
+              onchange="editItemBaris(${i},'harga',this.value)">
+          </div></td>
+      <td class="text-end fw-semibold" style="font-size:.82rem">Rp ${fmt(it.qty*it.harga)}</td>
+      <td class="text-end">
+        <button class="btn btn-sm btn-icon btn-outline-danger" onclick="hapusBarisEdit(${i})">
+          <i class="bi bi-trash3"></i>
+        </button>
+      </td>
+    </tr>`).join('');
+  updateEditTotal();
+}
+
+function editItemBaris(i, field, value){
+  if(!editItems[i]) return;
+  if(field==='qty') editItems[i].qty = Math.max(parseInt(value)||1,1);
+  else if(field==='harga'){
+    editItems[i].harga = parseFloat(value)||0;
+    editItems[i].harga_ret = editItems[i].harga;
+    editItems[i].harga_gro = editItems[i].harga;
+  }
+  else if(field==='satuan') editItems[i].satuan = ((value||'pcs')+'').trim().toLowerCase() || 'pcs';
+  else if(field==='keterangan') editItems[i].keterangan = (value||'').toString().trim();
+  else if(field==='nama') editItems[i].nama = (value||'').trim();
+  renderEditRows();
+}
+
+function tambahBarisEdit(){
+  editItems.push({nama:'', qty:1, satuan:'pcs', keterangan:'', harga:0, harga_ret:0, harga_gro:0, min_gro:10});
+  renderEditRows();
+}
+
+function hapusBarisEdit(i){
+  editItems.splice(i,1);
+  renderEditRows();
+}
+
+function updateEditTotal(){
+  const total = editItems.reduce((s,it)=>s + (parseInt(it.qty)||0)*(parseFloat(it.harga)||0), 0);
+  document.getElementById('edit-total').textContent = 'Rp '+fmt(total);
+}
+
+async function simpanEditNota(){
+  const items = editItems.filter(it=>(it.nama||'').trim());
+  if(!items.length) return showToast('Minimal 1 item dengan nama','warning');
+
+  const btn = document.getElementById('btn-simpan-edit');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Menyimpan…';
+  try{
+    const res = await fetch('/api/nota/update/'+NOTA_ID, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        pelanggan: document.getElementById('edit-pelanggan').value.trim(),
+        tanggal: document.getElementById('edit-tanggal').value,
+        items
+      })
+    });
+    const d = await res.json();
+    if(d.ok){
+      showToast('Nota berhasil diupdate','success');
+      setTimeout(()=>location.reload(), 600);
+    } else {
+      showToast('Gagal: '+(d.msg||'tidak diketahui'),'danger');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-save me-1"></i>Simpan Perubahan';
+    }
+  } catch(e){
+    showToast('Gagal menyimpan perubahan','danger');
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-save me-1"></i>Simpan Perubahan';
+  }
+}
+</script>
+{% endblock %}""")
 
 # ════════════════════════════════════════════════════════════════════════════
 #  PRODUK
@@ -1838,6 +2162,25 @@ PRODUK_HTML = _LAYOUT.replace('{% block content %}{% endblock %}', """{% block c
         {% endfor %}
       </tbody>
     </table>
+  </div>
+  <div id="produk-pagination" class="d-none flex-wrap align-items-center justify-content-between gap-2 px-3 py-2 border-top" style="border-color:var(--border)">
+    <div class="d-flex align-items-center gap-2" style="font-size:.78rem;color:var(--text-muted)">
+      <span>Tampilkan</span>
+      <select id="produk-perpage" class="form-select form-select-sm" style="width:auto">
+        <option value="10">10</option>
+        <option value="25" selected>25</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+      </select>
+      <span>per halaman · <span id="produk-range">0–0 dari 0</span></span>
+    </div>
+    <nav>
+      <ul class="pagination pagination-sm mb-0" id="produk-page-list"></ul>
+    </nav>
+  </div>
+  <div id="produk-nohasil" class="d-none py-4 text-center" style="color:var(--text-muted);font-size:.85rem">
+    <i class="bi bi-search d-block mb-2" style="font-size:1.5rem;opacity:.3"></i>
+    Tidak ada produk yang cocok dengan pencarian.
   </div>
   {% else %}
   <div class="card-body-custom">
@@ -1947,38 +2290,137 @@ async function hapusProduk(id, nama){
     showToast(nama+' dihapus','warning');
     const row = document.getElementById('row-'+id);
     if(row) row.remove();
-    filterProdukRows();
+    // Bangun ulang cache baris karena ada yang dihapus.
+    semuaBaris = [...document.getElementById('produk-table-body').querySelectorAll('tr')];
+    terapkanFilter();
   }
   else showToast('Gagal: '+d.msg,'danger');
 }
 
-function filterProdukRows(){
-  const inp = document.getElementById('produk-search');
-  const body = document.getElementById('produk-table-body');
-  if(!inp || !body) return;
-  const q = (inp.value || '').trim().toLowerCase();
-  const rows = [...body.querySelectorAll('tr')];
-  let visible = 0;
-  rows.forEach((row)=>{
-    const nama = row.dataset.nama || '';
-    const satuan = row.dataset.satuan || '';
-    const match = !q || nama.includes(q) || satuan.includes(q);
-    row.style.display = match ? '' : 'none';
-    if(match){
-      visible++;
-      const idxCell = row.querySelector('.row-index');
-      if(idxCell) idxCell.textContent = visible;
-    }
-  });
-  const count = document.getElementById('produk-count');
-  if(count) count.textContent = visible;
+// ── Pagination Daftar Produk ──────────────────────────────────────────────────
+let semuaBaris = [];
+let produkPage = 1;
+let produkPerPage = 25;
+
+function barisCocok(row, q){
+  if(!q) return true;
+  const nama = row.dataset.nama || '';
+  const satuan = row.dataset.satuan || '';
+  return nama.includes(q) || satuan.includes(q);
 }
 
-const produkSearch = document.getElementById('produk-search');
-if(produkSearch){
-  produkSearch.addEventListener('input', filterProdukRows);
-  filterProdukRows();
+function renderPagination(totalPages){
+  const list = document.getElementById('produk-page-list');
+  if(!list) return;
+  if(totalPages <= 1){ list.innerHTML = ''; return; }
+
+  const parts = [];
+  const tambah = (label, page, opts={})=>{
+    const cls = ['page-item', opts.active ? 'active' : '', opts.disabled ? 'disabled' : '']
+                  .filter(Boolean).join(' ');
+    parts.push(`<li class="${cls}">
+      <a class="page-link" href="#" data-page="${page}"
+         style="cursor:${opts.disabled?'not-allowed':'pointer'}">${label}</a></li>`);
+  };
+
+  tambah('<i class="bi bi-chevron-left"></i>', produkPage-1, {disabled: produkPage<=1});
+
+  // Window nomor halaman dengan ellipsis: 1 … 4 5 6 … 20
+  const windowSize = 1;
+  const pages = new Set([1, totalPages, produkPage]);
+  for(let p=produkPage-windowSize; p<=produkPage+windowSize; p++){
+    if(p>=1 && p<=totalPages) pages.add(p);
+  }
+  const sorted = [...pages].sort((a,b)=>a-b);
+  let prev = 0;
+  sorted.forEach(p=>{
+    if(prev && p - prev > 1){
+      parts.push('<li class="page-item disabled"><span class="page-link">…</span></li>');
+    }
+    tambah(p, p, {active: p===produkPage});
+    prev = p;
+  });
+
+  tambah('<i class="bi bi-chevron-right"></i>', produkPage+1, {disabled: produkPage>=totalPages});
+
+  list.innerHTML = parts.join('');
+  list.querySelectorAll('a.page-link').forEach(a=>{
+    a.addEventListener('click', e=>{
+      e.preventDefault();
+      const p = parseInt(a.dataset.page)||1;
+      if(p<1 || p>totalPages || p===produkPage) return;
+      produkPage = p;
+      terapkanFilter();
+      const card = document.getElementById('produk-pagination');
+      if(card) card.scrollIntoView({behavior:'smooth', block:'nearest'});
+    });
+  });
 }
+
+function terapkanFilter(){
+  const inp  = document.getElementById('produk-search');
+  const body = document.getElementById('produk-table-body');
+  const pag  = document.getElementById('produk-pagination');
+  const noHasil = document.getElementById('produk-nohasil');
+  if(!body) return;
+
+  const q = (inp ? (inp.value||'').trim().toLowerCase() : '');
+
+  const cocok = semuaBaris.filter(row=>barisCocok(row, q));
+  const total = cocok.length;
+  const totalPages = Math.max(Math.ceil(total / produkPerPage), 1);
+
+  if(produkPage > totalPages) produkPage = totalPages;
+  if(produkPage < 1) produkPage = 1;
+
+  const start = (produkPage - 1) * produkPerPage;
+  const end   = start + produkPerPage;
+
+  semuaBaris.forEach(row=>{ row.style.display = 'none'; });
+  cocok.slice(start, end).forEach(row=>{ row.style.display = ''; });
+
+  // Nomor urut global (lanjut antar halaman).
+  cocok.forEach((row, i)=>{
+    const idxCell = row.querySelector('.row-index');
+    if(idxCell) idxCell.textContent = i + 1;
+  });
+
+  const count = document.getElementById('produk-count');
+  if(count) count.textContent = total;
+
+  const range = document.getElementById('produk-range');
+  if(range){
+    range.textContent = total ? `${start+1}–${Math.min(end,total)} dari ${total}` : '0–0 dari 0';
+  }
+
+  if(pag) pag.className = total ? 'd-flex flex-wrap align-items-center justify-content-between gap-2 px-3 py-2 border-top' : 'd-none';
+  if(noHasil) noHasil.classList.toggle('d-none', total > 0);
+
+  renderPagination(totalPages);
+}
+
+// legacy alias (dipakai kompatibilitas internal bila ada).
+function filterProdukRows(){ terapkanFilter(); }
+
+(function initProdukPagination(){
+  const body = document.getElementById('produk-table-body');
+  if(!body) return;
+  semuaBaris = [...body.querySelectorAll('tr')];
+
+  const inp = document.getElementById('produk-search');
+  if(inp){
+    inp.addEventListener('input', ()=>{ produkPage = 1; terapkanFilter(); });
+  }
+  const perPage = document.getElementById('produk-perpage');
+  if(perPage){
+    perPage.addEventListener('change', ()=>{
+      produkPerPage = parseInt(perPage.value)||25;
+      produkPage = 1;
+      terapkanFilter();
+    });
+  }
+  terapkanFilter();
+})();
 </script>
 {% endblock %}""")
 
@@ -2075,7 +2517,7 @@ def index():
                                (today+'%',)).fetchone()['c']
     recent       = con.execute("SELECT * FROM nota ORDER BY id DESC LIMIT 6").fetchall()
     con.close()
-    omzet_fmt = f"Rp {omzet:,.0f}".replace(',','.')[:12]
+    omzet_fmt = f"Rp {omzet:,.0f}".replace(',','.')
     stats = dict(total_nota=total_nota, total_produk=total_produk,
                  omzet_fmt=omzet_fmt, nota_hari=nota_hari)
     return render(INDEX_HTML, page_title='Dashboard', active='home',
@@ -2113,9 +2555,15 @@ def detail(nota_id):
     items = con.execute("SELECT * FROM item_nota WHERE nota_id=?", (nota_id,)).fetchall()
     con.close()
     if not nota: return "Nota tidak ditemukan", 404
+    # Agregasi qty per satuan untuk ringkasan detail.
+    aggregate = {}
+    for it in items:
+        sat = normalize_space(it['satuan'] if 'satuan' in it.keys() else 'pcs').lower() or 'pcs'
+        aggregate[sat] = aggregate.get(sat, 0) + (int(it['qty']) if it['qty'] else 0)
+    qty_per_satuan = sorted(aggregate.items(), key=lambda kv: (-kv[1], kv[0]))
     return render(DETAIL_HTML, page_title=f'Detail {nota["nomor"]}',
                   breadcrumb='Detail Nota', active='riwayat',
-                  nota=nota, items=items)
+                  nota=nota, items=items, qty_per_satuan=qty_per_satuan)
 
 @app.route('/api/produk/<nama>')
 def api_produk(nama):
@@ -2150,11 +2598,16 @@ def api_produk_batch():
 
 @app.route('/api/produk/edit/<int:produk_id>', methods=['POST'])
 def api_produk_edit(produk_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'ok': False, 'msg': 'Payload tidak valid'})
+    if 'harga_ret' not in data or 'harga_gro' not in data or 'min_gro' not in data:
+        return jsonify({'ok': False, 'msg': 'Data produk tidak lengkap'})
     satuan = (data.get('satuan') or 'pcs').strip().lower()[:20]
     con  = get_con()
     con.execute("UPDATE produk SET harga_ret=?,harga_gro=?,min_gro=?,satuan=? WHERE id=?",
-                (data['harga_ret'], data['harga_gro'], data['min_gro'], satuan or 'pcs', produk_id))
+                (clean_number(data['harga_ret'], 0), clean_number(data['harga_gro'], 0),
+                 int(clean_number(data['min_gro'], 1)) or 1, satuan or 'pcs', produk_id))
     con.commit(); con.close()
     return jsonify({'ok': True})
 
@@ -2212,10 +2665,12 @@ def api_import_excel():
 
 @app.route('/api/simpan', methods=['POST'])
 def api_simpan():
-    data  = request.get_json()
+    data  = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'ok':False,'msg':'Payload tidak valid'})
     items = data.get('items', [])
     if not items: return jsonify({'ok':False,'msg':'Item kosong'})
-    pelanggan = data.get('pelanggan','').strip()
+    pelanggan = (data.get('pelanggan') or '').strip()
     tanggal_in = normalize_space(data.get('tanggal') or '')
     tanggal = datetime.now().strftime('%Y-%m-%d %H:%M')
     if tanggal_in:
@@ -2265,6 +2720,77 @@ def api_simpan():
       )
     con.commit(); con.close()
     return jsonify({'ok':True,'nota_id':nota_id,'nomor':nomor})
+
+@app.route('/api/nota/update/<int:nota_id>', methods=['POST'])
+def api_nota_update(nota_id):
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'ok': False, 'msg': 'Payload tidak valid'})
+
+    items = data.get('items', [])
+    if not items:
+        return jsonify({'ok': False, 'msg': 'Item kosong'})
+
+    con = get_con()
+    nota = con.execute("SELECT * FROM nota WHERE id=?", (nota_id,)).fetchone()
+    if not nota:
+        con.close()
+        return jsonify({'ok': False, 'msg': 'Nota tidak ditemukan'})
+
+    # Normalisasi item + hitung ulang subtotal/total di server agar konsisten.
+    for idx, i in enumerate(items):
+        i['nama'] = normalize_space(i.get('nama'))
+        i['qty'] = int(clean_number(i.get('qty'), 1)) or 1
+        i['harga'] = clean_number(i.get('harga'), 0)
+        i['harga_ret'] = clean_number(i.get('harga_ret', i['harga']), i['harga'])
+        i['harga_gro'] = clean_number(i.get('harga_gro', i['harga_ret']), i['harga_ret'])
+        i['min_gro'] = int(clean_number(i.get('min_gro'), 10)) or 10
+        i['subtotal'] = i['qty'] * i['harga']
+        i['satuan'] = normalize_space(i.get('satuan') or 'pcs').lower()[:20] or 'pcs'
+        i['keterangan'] = normalize_space(i.get('keterangan') or '')[:120]
+        if not i['nama']:
+            i['nama'] = f'Item {idx+1}'
+    total = sum(i['subtotal'] for i in items)
+
+    pelanggan = (data.get('pelanggan') or '').strip()
+    tanggal_in = normalize_space(data.get('tanggal') or '')
+    tanggal = nota['tanggal']
+    if tanggal_in:
+        parsed = None
+        for pat in ('%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+            try:
+                parsed = datetime.strptime(tanggal_in, pat)
+                break
+            except Exception:
+                pass
+        if parsed:
+            tanggal = parsed.strftime('%Y-%m-%d %H:%M')
+
+    cur = con.cursor()
+    # Sinkronkan harga produk (auto-learning) & ganti seluruh item nota.
+    for i in items:
+        satuan = (i.get('satuan') or 'pcs').strip().lower()[:20]
+        cur.execute('''INSERT INTO produk (nama,harga_ret,harga_gro,min_gro,satuan) VALUES (?,?,?,?,?)
+          ON CONFLICT(nama) DO UPDATE SET
+          harga_ret=CASE WHEN excluded.harga_ret>0 THEN excluded.harga_ret ELSE produk.harga_ret END,
+          harga_gro=CASE WHEN excluded.harga_gro>0 THEN excluded.harga_gro ELSE produk.harga_gro END,
+          min_gro=CASE WHEN excluded.min_gro>0 THEN excluded.min_gro ELSE produk.min_gro END,
+          satuan=CASE
+            WHEN excluded.satuan IS NOT NULL AND TRIM(excluded.satuan)<>'' THEN excluded.satuan
+            ELSE produk.satuan
+          END''',
+          (i['nama'], i['harga_ret'], i['harga_gro'], i['min_gro'], satuan or 'pcs'))
+
+    cur.execute("UPDATE nota SET pelanggan=?, tanggal=?, total=? WHERE id=?",
+                (pelanggan, tanggal, total, nota_id))
+    cur.execute("DELETE FROM item_nota WHERE nota_id=?", (nota_id,))
+    for i in items:
+        cur.execute(
+            "INSERT INTO item_nota (nota_id,nama,qty,satuan,keterangan,harga,subtotal) VALUES (?,?,?,?,?,?,?)",
+            (nota_id, i['nama'], i['qty'], i['satuan'], i['keterangan'], i['harga'], i['subtotal'])
+        )
+    con.commit(); con.close()
+    return jsonify({'ok': True, 'total': total})
 
 @app.route('/api/nota/edit-nomor/<int:nota_id>', methods=['POST'])
 def api_nota_edit_nomor(nota_id):
@@ -2380,10 +2906,7 @@ def pdf_route(nota_id):
             p.set_font('Arial', '', 9.1)
 
         satuan = normalize_space(it['satuan'] if 'satuan' in it.keys() else 'pcs') or 'pcs'
-        ket = normalize_space(it['keterangan'] if 'keterangan' in it.keys() else '')
-        nama = normalize_space(it['nama'])
-        if ket:
-            nama = f"{nama} {ket}"[:34]
+        nama = normalize_space(it['nama']).upper()
         if len(nama) > 34:
             nama = nama[:31] + '...'
 

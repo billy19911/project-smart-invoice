@@ -2,6 +2,19 @@
 
 Semua perubahan penting pada project ini didokumentasikan di file ini.
 
+## [1.2.0] - 2026-03-10
+
+### Changed
+- `Masukkan Semua via Tambah Barang` kini melakukan **batch insert** ke Preview Nota dalam satu kali render + satu kali autosave (sebelumnya memproses tiap item secara berurutan dengan fetch/render/save per item). Import Excel dengan banyak baris jadi jauh lebih cepat.
+- Baris import dengan nama produk sama otomatis **digabung** (qty dijumlahkan) agar tidak dobel di Preview.
+
+### Added
+- **Edit Nota** dari halaman Detail: tombol `Edit Nota` membuka panel untuk mengubah nama pelanggan, tanggal nota, dan seluruh item (nama, qty, satuan, keterangan, harga) — termasuk tambah/hapus baris. Total nota dihitung ulang otomatis.
+- Endpoint `POST /api/nota/update/<id>` untuk menyimpan perubahan nota (mengganti seluruh item, meng-upsert harga produk, dan menghitung ulang total di server).
+- **Pagination** pada halaman Daftar Produk: selector jumlah per halaman (10/25/50/100, default 25), info rentang `x–y dari N`, tombol navigasi dengan ellipsis, serta nomor urut (`#`) global yang berlanjut antar halaman.
+- Pagination terintegrasi dengan pencarian (filter dulu, lalu dipaginasi) dan menampilkan pesan "tidak ada produk cocok" bila hasil kosong.
+- Notifikasi peringatan saat item hasil import memiliki harga `0` (item tetap dimasukkan ke Preview untuk dicek manual).
+
 ## [1.1.0] - 2026-03-09
 
 ### Added
