@@ -5,6 +5,7 @@ Semua perubahan penting pada project ini didokumentasikan di file ini.
 ## [1.2.0] - 2026-03-10
 
 ### Changed
+- Sidebar PDF nota (panel kiri + logo kop + info "Tagihan Untuk" + Contact Person) kini tampil di **setiap halaman** PDF, bukan hanya halaman pertama. Berguna saat item nota banyak sehingga nota lebih dari satu halaman.
 - `Masukkan Semua via Tambah Barang` kini melakukan **batch insert** ke Preview Nota dalam satu kali render + satu kali autosave (sebelumnya memproses tiap item secara berurutan dengan fetch/render/save per item). Import Excel dengan banyak baris jadi jauh lebih cepat.
 - Baris import dengan nama produk sama otomatis **digabung** (qty dijumlahkan) agar tidak dobel di Preview.
 

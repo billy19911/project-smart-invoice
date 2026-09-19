@@ -2826,38 +2826,47 @@ def pdf_route(nota_id):
     logo_cap = find_asset_image('logocap')
     logo_ttd = find_asset_image('ttd')
 
-    p = FPDF('P', 'mm', 'A4')
+    pelanggan = normalize_space(nota['pelanggan'] or 'UMUM')
+
+    # Subclass FPDF: sidebar (panel + logo + kontak) digambar ulang di tiap halaman
+    # lewat header() yang otomatis dipanggil FPDF setiap add_page().
+    class NotaPDF(FPDF):
+        def header(self):
+            self.set_line_width(0.2)
+            # Panel kiri
+            self.set_fill_color(238, 238, 238)
+            self.rect(0, 0, 48, 297, style='F')
+            self.set_fill_color(247, 198, 0)
+            self.rect(48, 0, 7.2, 297, style='F')
+            self.set_fill_color(45, 208, 227)
+            self.rect(50.9, 37.5, 4.0, 230, style='F')
+
+            # Logo kop surat
+            if logo_kop:
+                self.image(logo_kop, x=3.8, y=8.8, w=42.8)
+
+            # Nama pelanggan
+            self.set_text_color(62, 62, 62)
+            self.set_xy(7.5, 49.3)
+            self.set_font('Arial', 'B', 8.8)
+            self.cell(38, 5, 'Tagihan Untuk :')
+            self.set_xy(7.5, 56.0)
+            self.set_font('Arial', 'B', 10.2)
+            self.multi_cell(38, 6, pelanggan.upper())
+
+            # Contact person (sidebar)
+            self.set_text_color(62, 62, 62)
+            self.set_xy(7.5, 231)
+            self.set_font('Arial', 'B', 8.5)
+            self.cell(38, 4.8, 'Contact Person :')
+            self.set_xy(7.5, 238)
+            self.set_font('Arial', '', 9.2)
+            self.multi_cell(38, 5, 'Reynold Andika\n0817-4173-826')
+
+    p = NotaPDF('P', 'mm', 'A4')
     p.set_auto_page_break(auto=True, margin=12)
     p.add_page()
     p.set_margins(0, 0, 0)
-    p.set_line_width(0.2)
-
-    # Panel kiri
-    p.set_fill_color(238, 238, 238)
-    p.rect(0, 0, 48, 297, style='F')
-    p.set_fill_color(247, 198, 0)
-    p.rect(48, 0, 7.2, 297, style='F')
-    p.set_fill_color(45, 208, 227)
-    p.rect(50.9, 37.5, 4.0, 230, style='F')
-
-    if logo_kop:
-      p.image(logo_kop, x=3.8, y=8.8, w=42.8)
-
-    pelanggan = normalize_space(nota['pelanggan'] or 'UMUM')
-    p.set_text_color(62, 62, 62)
-    p.set_xy(7.5, 49.3)
-    p.set_font('Arial', 'B', 8.8)
-    p.cell(38, 5, 'Tagihan Untuk :')
-    p.set_xy(7.5, 56.0)
-    p.set_font('Arial', 'B', 10.2)
-    p.multi_cell(38, 6, pelanggan.upper())
-
-    p.set_xy(7.5, 231)
-    p.set_font('Arial', 'B', 8.5)
-    p.cell(38, 4.8, 'Contact Person :')
-    p.set_xy(7.5, 238)
-    p.set_font('Arial', '', 9.2)
-    p.multi_cell(38, 5, 'Reynold Andika\n0817-4173-826')
 
     # Konten kanan
     content_x = 61.5
@@ -2881,28 +2890,29 @@ def pdf_route(nota_id):
     )
     p.set_xy(content_x, 55)
     p.set_font('Arial', '', 10.5)
+    p.set_text_color(70, 70, 70)
     p.multi_cell(content_w, 7, intro)
 
     table_y = p.get_y() + 1.5
     widths = [10, 56, 13, 17, 21, 24.5]
     headers = ['NO', 'NAMA BARANG', 'QTY', 'SATUAN', 'HARGA JUAL', 'TOTAL']
-    p.set_xy(content_x, table_y)
-    p.set_font('Arial', 'B', 9.4)
-    p.set_fill_color(233, 233, 233)
-    for w, h in zip(widths, headers):
-        p.cell(w, 7, h, border=1, align='C', fill=True)
-    p.ln(7)
+
+    def tabel_header(y):
+        p.set_xy(content_x, y)
+        p.set_font('Arial', 'B', 9.4)
+        p.set_fill_color(233, 233, 233)
+        p.set_text_color(62, 62, 62)
+        for w, h in zip(widths, headers):
+            p.cell(w, 7, h, border=1, align='C', fill=True)
+        p.ln(7)
+
+    tabel_header(table_y)
 
     p.set_font('Arial', '', 9.1)
     for idx, it in enumerate(items, 1):
         if p.get_y() > 232:
             p.add_page()
-            p.set_fill_color(233, 233, 233)
-            p.set_xy(content_x, 16)
-            p.set_font('Arial', 'B', 9.4)
-            for w, h in zip(widths, headers):
-                p.cell(w, 7, h, border=1, align='C', fill=True)
-            p.ln(7)
+            tabel_header(16)
             p.set_font('Arial', '', 9.1)
 
         satuan = normalize_space(it['satuan'] if 'satuan' in it.keys() else 'pcs') or 'pcs'

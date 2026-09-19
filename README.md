@@ -41,7 +41,7 @@ Aplikasi kasir / nota penjualan berbasis web yang berjalan lokal di laptop — b
 
 **Install dependencies:**
 ```bash
-py -m pip install flask fpdf2 pystray Pillow
+py -m pip install -r requirements.txt
 ```
 
 **Jalankan:**
@@ -53,17 +53,19 @@ py app.py
 
 ## 📦 Cara Build ke .exe
 
+Install dependencies + PyInstaller:
 ```bash
-py -m pip install flask fpdf2 pystray Pillow pyinstaller
+py -m pip install -r requirements.txt pyinstaller
 ```
 
 Lalu double-click `build.bat` — atau manual:
-
 ```bash
-py -m PyInstaller --onefile --noconsole --name "SmartNota" app.py
+py -m PyInstaller --onefile --noconsole --name "SmartNota" --add-data "img;img" app.py
 ```
 
 File `.exe` akan muncul di folder `dist/`.
+
+> `--add-data "img;img"` wajib disertakan agar logo kop/cap/ttd ikut terbundle untuk PDF.
 
 ---
 
@@ -74,6 +76,7 @@ Smart Nota Portable/
 ├── app.py           # Aplikasi utama (Flask + semua HTML embedded)
 ├── build.bat        # Script build ke .exe
 ├── requirements.txt # Daftar library
+├── img/             # Asset PDF (LOGOKOP, LOGOCAP, TTD)
 ├── smartnota.db     # Database SQLite (dibuat otomatis saat pertama jalan)
 └── .gitignore
 ```
