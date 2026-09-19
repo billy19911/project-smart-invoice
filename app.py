@@ -2990,8 +2990,35 @@ def hapus(nota_id):
 # ════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT – System Tray + Auto Browser
 # ════════════════════════════════════════════════════════════════════════════
-def run_flask():
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+HOST = '0.0.0.0'
+PORT = 5000
+
+# Referensi server aktif agar bisa di-restart / di-stop dari tray.
+_server = None
+_server_lock = None  # diinisialisasi di main
+
+
+def _start_flask_server():
+    """Buat & jalankan server Werkzeug (punya shutdown() yang bersih)."""
+    global _server
+    from werkzeug.serving import make_server
+    srv = make_server(HOST, PORT, app, threaded=True)
+    _server = srv
+    try:
+        srv.serve_forever()
+    except Exception:
+        pass
+    finally:
+        _server = None
+
+
+def _port_in_use(host='127.0.0.1', port=PORT):
+    """True kalau ada yang melayani koneksi TCP di host:port."""
+    import socket as _s
+    with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as sock:
+        sock.settimeout(0.6)
+        return sock.connect_ex((host, port)) == 0
+
 
 def buat_ikon():
     from PIL import Image, ImageDraw
@@ -3006,33 +3033,88 @@ def buat_ikon():
     d.rectangle([22, 34, 36, 36], fill=(79, 70, 229))
     return img
 
-if __name__ == '__main__':
-    import threading, webbrowser, time
+
+def main():
+    global _server_lock
+    import threading, webbrowser, time, socket as _s
+
+    _server_lock = threading.Lock()
     ip  = get_ip()
     url = 'http://127.0.0.1:5000'
 
-    threading.Thread(target=run_flask, daemon=True).start()
+    # Cegah instance ganda: kalau ada server yang sudah melayani di port ini,
+    # ini instance kedua -> cukup buka browser lalu keluar.
+    def _single_instance_guard():
+        return _port_in_use('127.0.0.1', PORT)
+
+    if _single_instance_guard():
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        print(f"Smart Nota sudah berjalan di {url}")
+        return
+
+    def start_server():
+        t = threading.Thread(target=_start_flask_server, daemon=True)
+        t.start()
+        # tunggu sampai port benar-benar siap
+        for _ in range(50):
+            if _port_in_use():
+                break
+            time.sleep(0.1)
+        return t
+
+    start_server()
 
     def _browser():
         time.sleep(1.5); webbrowser.open(url)
     threading.Thread(target=_browser, daemon=True).start()
 
+    def stop_server():
+        """Hentikan server aktif dengan aman."""
+        global _server
+        with _server_lock:
+            srv = _server
+        if srv is not None:
+            try: srv.shutdown()
+            except Exception: pass
+        # tunggu sampai port benar-benar lepas
+        for _ in range(30):
+            if not _port_in_use():
+                break
+            time.sleep(0.1)
+
     try:
         import pystray
 
         def on_buka(icon, item): webbrowser.open(url)
-        def on_stop(icon, item): icon.stop(); os._exit(0)
+
+        def on_restart(icon, item):
+            stop_server()
+            start_server()
+            webbrowser.open(url)
+
+        def on_stop(icon, item):
+            stop_server()
+            icon.stop()
+            os._exit(0)
 
         menu = pystray.Menu(
-            pystray.MenuItem(f'🌐  Buka Smart Nota  ({ip}:5000)', on_buka, default=True),
+            pystray.MenuItem(f'🌐  Buka Smart Nota  ({ip}:{PORT})', on_buka, default=True),
+            pystray.MenuItem('🔄  Restart Server', on_restart),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem('⏹  Stop Server', on_stop),
         )
-        ikon = pystray.Icon('SmartNota', buat_ikon(), f'Smart Nota – {ip}:5000', menu)
+        ikon = pystray.Icon('SmartNota', buat_ikon(), f'Smart Nota – {ip}:{PORT}', menu)
         ikon.run()
 
-    except Exception as e:
-        print(f"\n  Smart Nota aktif: {url}  |  Jaringan: http://{ip}:5000")
+    except Exception:
+        print(f"\n  Smart Nota aktif: {url}  |  Jaringan: http://{ip}:{PORT}")
         print("  CTRL+C untuk stop\n")
         try: threading.Event().wait()
         except KeyboardInterrupt: pass
+
+
+if __name__ == '__main__':
+    main()

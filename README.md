@@ -21,7 +21,7 @@ Aplikasi kasir / nota penjualan berbasis web yang berjalan lokal di laptop — b
 | 🕒 Riwayat Nota | Lihat semua nota + filter pencarian |
 | 📄 Export PDF | Download nota dalam format PDF siap cetak |
 | 📱 Mobile Friendly | Bisa diakses dari HP lewat Wi-Fi |
-| 🖥️ System Tray | Ikon di taskbar, klik kanan untuk Stop/Buka |
+| 🖥️ System Tray | Ikon di pojok kanan bawah (taskbar): Buka / Restart Server / Stop Server |
 
 ---
 
@@ -34,6 +34,14 @@ Aplikasi kasir / nota penjualan berbasis web yang berjalan lokal di laptop — b
 5. Dari HP (pastikan 1 Wi-Fi): buka browser → ketik `http://<IP_LAPTOP>:5000`
 
 > IP laptop akan tampil di sidebar aplikasi secara otomatis.
+
+**Ikon System Tray** (pojok kanan bawah taskbar) — klik kanan untuk:
+- 🌐 **Buka Smart Nota** — buka aplikasi di browser
+- 🔄 **Restart Server** — restart server tanpa menutup aplikasi
+- ⏹ **Stop Server** — matikan server & tutup aplikasi
+
+> Aplikasi hanya berjalan satu instance. Membuka `SmartNota.exe` lagi saat sudah
+> berjalan tidak akan membuat server kedua — hanya membuka browser.
 
 ---
 
